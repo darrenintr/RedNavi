@@ -215,6 +215,7 @@ test:
 		tests/host/mes_runtime_submit_test.cpp -o build/mes_runtime_submit_test
 	./build/mes_runtime_submit_test
 	python3 -m unittest discover -s tests/host -p 'navi33_pci_resources_test.py'
+	python3 -m unittest discover -s tests/host -p 'navi33_diag_isolation_test.py'
 	python3 -m unittest discover -s tests/host -p 'navi33_p6_firmware_audit_test.py'
 
 # Exercise optional firmware call sites without embedding or linking any firmware.
