@@ -1,0 +1,29 @@
+name: Navi33 offline scheduler plugin
+on:
+  push:
+    branches: [feature/navi33-scheduler-plugin]
+  pull_request:
+    paths:
+      - 'RedNavi/navi33_scheduler_plugin.h'
+      - 'tests/host/navi33_scheduler_plugin_test.cpp'
+      - 'docs/NAVI33_SCHEDULER_PLUGIN.md'
+      - '.github/workflows/navi33-scheduler.yml'
+
+jobs:
+  host-scheduler:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and run synthetic host tests (ASan + UBSan)
+        run: |
+          mkdir -p build
+          ${{ matrix.compiler }} -std=c++17 -O1 -g \
+            -Wall -Wextra -Werror -pedantic \
+            -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -IRedNavi tests/host/navi33_scheduler_plugin_test.cpp \
+            -o build/navi33_scheduler_plugin_test
+          ./build/navi33_scheduler_plugin_test
