@@ -1,0 +1,41 @@
+name: Navi33 M4 GC11.0.2 address and profile tests
+on:
+  push:
+    branches: ['feature/navi33-m4-gc1102']
+    paths:
+      - 'RedNavi/navi33_address_spaces.h'
+      - 'RedNavi/navi33_m4_asic.h'
+      - 'RedNavi/navi33_bootstrap.h'
+      - 'RedNavi/navi33_linux_boot_parity.h'
+      - 'tests/host/navi33_address_spaces_test.cpp'
+      - 'tests/host/navi33_m4_asic_test.cpp'
+      - '.github/workflows/navi33-m4-gc1102.yml'
+  pull_request:
+    paths:
+      - 'RedNavi/**'
+      - 'compat/include/amd/rn_device.h'
+      - 'tests/host/navi33*'
+      - 'Makefile'
+      - '.github/workflows/navi33-m4-gc1102.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-typed-addresses:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: ['g++', 'clang++']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and run address-space / M4 profile tests (ASan + UBSan)
+        run: |
+          mkdir -p build
+          for src in tests/host/navi33_address_spaces_test.cpp tests/host/navi33_m4_asic_test.cpp; do
+            out=build/$(basename "$src" .cpp)
+            ${{ matrix.cxx }} -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic               -fsanitize=address,undefined -fno-omit-frame-pointer               -IRedNavi "$src" -o "$out"
+            "$out"
+          done
