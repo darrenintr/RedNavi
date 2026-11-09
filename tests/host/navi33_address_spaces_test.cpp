@@ -2,6 +2,7 @@
 // All tests are offline: no device, MMIO, firmware or GPU queues.
 #include "navi33_address_spaces.h"
 #include <assert.h>
+#include <initializer_list>
 #include <stdint.h>
 #include <type_traits>
 
