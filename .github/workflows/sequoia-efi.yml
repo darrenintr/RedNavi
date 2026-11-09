@@ -16,7 +16,7 @@ jobs:
   build:
     name: Download official binaries, validate, and package EFI
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - name: Checkout branch
         uses: actions/checkout@v4
@@ -55,6 +55,19 @@ jobs:
               assert required in names, f"Missing {required}"
           print(f"Verified {len(names)} EFI files in {path}")
           '@ | python -
+
+      - name: Download Sequoia Recovery and package USB-ready ZIP
+        shell: pwsh
+        run: python tools/sequoia-efi/package_usb.py
+
+      - name: Upload USB Recovery and EFI ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sequoia-USB-Recovery-TUF-B450M
+          path: tools/sequoia-efi/output/USB-Sequoia-Recovery-TUF-B450M.zip
+          if-no-files-found: error
+          retention-days: 15
+          compression-level: 0
 
       - name: Upload complete EFI.zip
         uses: actions/upload-artifact@v4
