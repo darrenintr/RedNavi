@@ -7,7 +7,7 @@
 // It contains no register writes, no GPU accesses, and cannot enable hardware.
 //
 // Linux baseline: torvalds/linux 7475ea8b58616b33c04afb976cf0fbaad9dd63fb.
-// Branch: PSP firmware loading, GC 11.0.2, enable_mes_kiq=1,
+// Branch: PSP firmware loading, GC 11.0.2, PSP/SMU 13.0.7, enable_mes_kiq=1,
 // amdgpu_async_gfx_ring=1, MES legacy mapping with firmware >= 0x47.
 #include <stddef.h>
 #include <stdint.h>
@@ -18,28 +18,35 @@ constexpr bool kHardwareWritesEnabled = false;
 constexpr uint32_t kMesLegacyVersion = 0x47u;
 constexpr uint32_t kMesResources1Version = 0x52u;
 constexpr uint32_t kMesVersionMask = 0xfffu;
-constexpr unsigned kMaxSteps = 32u;
+constexpr unsigned kMaxSteps = 48u;
 
 enum class Step : uint8_t {
-    Discovery, CommonHw, GmcHw, IhHw, PspFw, SmuHw,
+    Discovery, CommonSwReady, CommonHw, GmcSwReady, GmcMmhubHw,
+    WritebackReady, IpSoftwareReady, IbPoolReady, FirmwareBoReady, IhHw,
+    PspRingReady, PspTmrAllocated, PspSmuFirmware, PspTmrInstalled,
+    PspGraphicsFirmware, PspRlcAutoloadStart, PspFwComplete, SmuHw,
     GfxRlcAutoloadWait, GfxHubEnable, GfxGolden, GfxConstants,
-    NbioDoorbells, GfxRlcResume, CpDoorbellRanges,
+    NbioDoorbells, GfxRlcResume, CpDoorbellRanges, CpEnginesEnable,
     MesKiqStart, MesKiqQueue, MesSchedulerMap,
     MesSetResources, MesSetResources1, MesQueryStatus,
-    MesOwnershipTransfer, KcqMqd, KcqKiqSetResources,
+    MesSchedulerReady, KcqMqd, KcqKiqSetResources,
     KcqMesMap, KgqMqd, KgqMesMap,
-    GfxStart, GfxFence, ComputeFence
+    GfxStart, GfxScratchTest, ComputeScratchTest, MesHwFinalize,
+    None = 0xffu // no next stage; invalid or complete, as indicated by Progress
 };
 
 enum class Error : uint8_t {
     Ok, UnsupportedAsic, WrongBootPath, UnknownMesVersion,
     UnsupportedMesVersion, LegacyQueueConflict,
-    WrongOrder, MissingEvidence, AlreadyComplete, InvalidPlan
+    WrongOrder, MissingEvidence, AlreadyComplete, InvalidPlan,
+    UnsupportedIpVersion
 };
 
 struct Settings {
     uint16_t vendor = 0, device = 0;
     uint16_t gcMajor = 0, gcMinor = 0, gcRevision = 0;
+    uint16_t pspMajor = 0, pspMinor = 0, pspRevision = 0;
+    uint16_t smuMajor = 0, smuMinor = 0, smuRevision = 0;
     bool pspFirmware = false; // AMDGPU_FW_LOAD_PSP
     bool mesKiq = false;       // adev->enable_mes_kiq
     bool asyncGfx = false;     // amdgpu_async_gfx_ring
@@ -50,45 +57,104 @@ struct Settings {
 
 struct Plan {
     Error error = Error::InvalidPlan;
+    Settings settings{};
     Step stages[kMaxSteps]{};
     unsigned count = 0;
-    bool valid() const { return error == Error::Ok; }
+    bool valid() const;
 };
 
 inline bool navi33(const Settings &s) {
     return s.vendor == 0x1002u && s.device == 0x7480u &&
            s.gcMajor == 11u && s.gcMinor == 0u && s.gcRevision == 2u;
 }
+namespace detail {
+inline Error settingsError(const Settings &s) {
+    if (!navi33(s)) return Error::UnsupportedAsic;
+    // The PMFW-before-TMR-install rule is PSP13.0.7-specific. A GC match
+    // alone must not select that rule for another discovered MP0/MP1 IP.
+    if (s.pspMajor != 13u || s.pspMinor != 0u || s.pspRevision != 7u ||
+        s.smuMajor != 13u || s.smuMinor != 0u || s.smuRevision != 7u)
+        return Error::UnsupportedIpVersion;
+    if (!s.pspFirmware || !s.mesKiq || !s.asyncGfx) {
+        return Error::WrongBootPath;
+    }
+    if (s.directG34G42Active) return Error::LegacyQueueConflict;
+    if (!s.mesVersionObserved) return Error::UnknownMesVersion;
+    const uint32_t ver = s.mesSchedulerVersion & kMesVersionMask;
+    if (ver < kMesLegacyVersion) return Error::UnsupportedMesVersion;
+    return Error::Ok;
+}
+
+// This is the dependency projection for the selected boot branch, not a
+// list of every callback (display, SDMA and multimedia are not expanded).
+// Sources: amdgpu_device.c::amdgpu_device_ip_init,
+// amdgpu_psp.c::psp_hw_start/psp_load_non_psp_fw and gfx_v11_0_cp_resume.
+inline constexpr Step kPrefix[] = {
+    Step::Discovery, Step::CommonSwReady, Step::CommonHw,
+    Step::GmcSwReady, Step::GmcMmhubHw, Step::WritebackReady,
+    Step::IpSoftwareReady, Step::IbPoolReady, Step::FirmwareBoReady,
+    Step::IhHw, Step::PspRingReady, Step::PspTmrAllocated,
+    Step::PspSmuFirmware, Step::PspTmrInstalled,
+    Step::PspGraphicsFirmware, Step::PspRlcAutoloadStart,
+    Step::PspFwComplete, Step::SmuHw,
+    Step::GfxRlcAutoloadWait, Step::GfxHubEnable, Step::GfxGolden,
+    Step::GfxConstants, Step::NbioDoorbells, Step::GfxRlcResume,
+    Step::CpDoorbellRanges, Step::CpEnginesEnable,
+    Step::MesKiqStart, Step::MesKiqQueue,
+    Step::MesSchedulerMap, Step::MesSetResources
+};
+inline constexpr Step kSuffix[] = {
+    Step::MesQueryStatus, Step::MesSchedulerReady,
+    // Even after the early scheduler init, GC11's non-unified MES path
+    // sends KIQ SET_RESOURCES before mapping kernel compute queues.
+    Step::KcqMqd, Step::KcqKiqSetResources, Step::KcqMesMap,
+    Step::KgqMqd, Step::KgqMesMap, Step::GfxStart,
+    // These Linux ring tests modify SCRATCH_REG0. They do NOT prove an
+    // IB's GPU memory writeback or a dma_fence completed successfully.
+    Step::GfxScratchTest, Step::ComputeScratchTest,
+    // The later MES IP hw_init takes its already-ready path and resets
+    // KIQ sched.ready=false after the initialization-only KIQ use above.
+    Step::MesHwFinalize
+};
+constexpr unsigned kPrefixCount = sizeof(kPrefix) / sizeof(kPrefix[0]);
+constexpr unsigned kSuffixCount = sizeof(kSuffix) / sizeof(kSuffix[0]);
+static_assert(kPrefixCount + 1u + kSuffixCount <= kMaxSteps,
+              "Linux boot stages exceed plan capacity");
+
+inline bool needsResources1(const Settings &s) {
+    return (s.mesSchedulerVersion & kMesVersionMask) >= kMesResources1Version;
+}
+inline unsigned stageCount(const Settings &s) {
+    return kPrefixCount + kSuffixCount + (needsResources1(s) ? 1u : 0u);
+}
+inline Step stageAt(const Settings &s, unsigned index) {
+    if (index < kPrefixCount) return kPrefix[index];
+    index -= kPrefixCount;
+    if (needsResources1(s)) {
+        if (!index) return Step::MesSetResources1;
+        --index;
+    }
+    return index < kSuffixCount ? kSuffix[index] : Step::None;
+}
+} // namespace detail
+
+inline bool Plan::valid() const {
+    if (error != Error::Ok || detail::settingsError(settings) != Error::Ok ||
+        count != detail::stageCount(settings) || count > kMaxSteps)
+        return false;
+    for (unsigned i = 0; i < count; ++i)
+        if (stages[i] != detail::stageAt(settings, i)) return false;
+    return true;
+}
+
 inline Plan makePlan(const Settings &s) {
     Plan p{};
-    if (!navi33(s)) { p.error = Error::UnsupportedAsic; return p; }
-    if (!s.pspFirmware || !s.mesKiq || !s.asyncGfx) {
-        p.error = Error::WrongBootPath; return p;
-    }
-    if (s.directG34G42Active) { p.error = Error::LegacyQueueConflict; return p; }
-    if (!s.mesVersionObserved) { p.error = Error::UnknownMesVersion; return p; }
-    const uint32_t ver = s.mesSchedulerVersion & kMesVersionMask;
-    if (ver < kMesLegacyVersion) { p.error = Error::UnsupportedMesVersion; return p; }
-
-    const Step prefix[] = {
-        Step::Discovery, Step::CommonHw, Step::GmcHw, Step::IhHw,
-        Step::PspFw, Step::SmuHw,
-        Step::GfxRlcAutoloadWait, Step::GfxHubEnable, Step::GfxGolden,
-        Step::GfxConstants, Step::NbioDoorbells, Step::GfxRlcResume,
-        Step::CpDoorbellRanges, Step::MesKiqStart, Step::MesKiqQueue,
-        Step::MesSchedulerMap, Step::MesSetResources
-    };
-    const Step suffix[] = {
-        Step::MesQueryStatus, Step::MesOwnershipTransfer,
-        Step::KcqMqd, Step::KcqKiqSetResources, Step::KcqMesMap,
-        Step::KgqMqd, Step::KgqMesMap, Step::GfxStart,
-        Step::GfxFence, Step::ComputeFence
-    };
-    for (const Step stage : prefix) p.stages[p.count++] = stage;
-    if (ver >= kMesResources1Version)
-        p.stages[p.count++] = Step::MesSetResources1;
-    for (const Step stage : suffix) p.stages[p.count++] = stage;
-    p.error = Error::Ok;
+    p.settings = s;
+    p.error = detail::settingsError(s);
+    if (p.error != Error::Ok) return p;
+    p.count = detail::stageCount(s);
+    for (unsigned i = 0; i < p.count; ++i)
+        p.stages[i] = detail::stageAt(s, i);
     return p;
 }
 
@@ -98,13 +164,13 @@ inline Plan makePlan(const Settings &s) {
 struct Progress {
     Error error = Error::InvalidPlan;
     unsigned nextIndex = 0;
-    Step nextStep = Step::Discovery;
-    bool done = false;
+    Step nextStep = Step::None;
+    bool done = false; // complete report, not permission or proof of acceleration
 };
 inline Progress checkProgress(const Plan &plan, const Step *events,
                               const bool *verified, unsigned count) {
     Progress out{};
-    if (!plan.valid() || plan.count > kMaxSteps) return out;
+    if (!plan.valid()) return out;
     if (count > plan.count || (count && (!events || !verified))) {
         out.error = Error::WrongOrder; return out;
     }

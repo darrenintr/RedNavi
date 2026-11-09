@@ -1,0 +1,53 @@
+name: Initialization resources
+on:
+  push:
+    branches: ['feature/navi33-init-resources']
+  pull_request:
+    paths:
+      - 'RedNavi/rn_dma_pages.h'
+      - 'RedNavi/rn_mes_workspace.h'
+      - 'RedNavi/navi33_linux_boot_parity.h'
+      - 'RedNavi/gfx11.*'
+      - 'RedNavi/kern_probe.cpp'
+      - 'tests/host/dma_pages_test.cpp'
+      - 'tests/host/mes_workspace_test.cpp'
+      - 'tests/host/mes_runtime_*_test.cpp'
+      - 'tests/host/stubs/**'
+      - 'tests/host/navi33_linux_boot_parity_test.cpp'
+      - 'Makefile'
+      - '.github/workflows/init-resources.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-contracts:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: ['g++', 'clang++']
+    steps:
+      - uses: actions/checkout@v5
+      - name: DMA, MES workspace and initialization order (ASan + UBSan)
+        run: |
+          mkdir -p build
+          for name in dma_pages mes_workspace navi33_linux_boot_parity; do
+            ${{ matrix.cxx }} -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic \
+              -fsanitize=address,undefined -fno-omit-frame-pointer -IRedNavi \
+              "tests/host/${name}_test.cpp" -o "build/${name}_sanitized"
+            "build/${name}_sanitized"
+          done
+      - name: Actual MES runtime rejection and submission failures (ASan + UBSan)
+        run: |
+          ${{ matrix.cxx }} -std=c++17 -O1 -g -Wall -Wextra -Werror \
+            -fsanitize=address,undefined -fno-omit-frame-pointer -DRN_HOST_TEST \
+            -Itests/host/stubs -Icompat/include -IRedNavi \
+            tests/host/mes_runtime_reject_test.cpp RedNavi/gfx11.cpp -o build/mes_runtime_reject_sanitized
+          ./build/mes_runtime_reject_sanitized
+          ${{ matrix.cxx }} -std=c++17 -O1 -g -Wall -Wextra -Werror \
+            -fsanitize=address,undefined -fno-omit-frame-pointer -DRN_HOST_TEST \
+            -Itests/host/stubs -Icompat/include -IRedNavi \
+            tests/host/mes_runtime_submit_test.cpp -o build/mes_runtime_submit_sanitized
+          ./build/mes_runtime_submit_sanitized

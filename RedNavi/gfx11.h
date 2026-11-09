@@ -4,6 +4,7 @@
 #define REDNAVI_GFX11_H
 
 #include <amd/rn_device.h>
+#include "rn_mes_workspace.h"
 
 #define RN_VRAM_MC_BASE 0x8000000000ull       // MC address of the start of VRAM on this card (MMHUB FB_LOCATION_BASE 0x8000)
 
@@ -186,16 +187,16 @@ void rn_gfx_queue_map(struct rn_device *adev, struct rn_gfxq_result *res);
 void rn_gfx_ring_pointers(struct rn_device *adev, u32 *rptr, u32 *wptr);   // the graphics ring's read pointer word (in memory) and the write counter
 int rn_gfx_queue_reset(struct rn_device *adev, u32 info[4]);   // see gfx11.cpp; info as for rn_compute_queue_reset
 // An indirect buffer on the graphics queue followed by a fence write (the same two packets rn_compute_submit_ib sends); 0, -EAGAIN when the ring stayed full for 2 s without the
-// read position moving (nothing was written), -EINVAL.
+// read position moving (nothing was written), -ENODEV when the queue/doorbell is unavailable, -EIO for a workspace access failure.
 int rn_gfx_submit_ib(struct rn_device *adev, u64 ib_va, u32 ib_dwords, u64 fence_va, u32 fence_value, u32 vmid);
 int rn_compute_queue_reset(struct rn_device *adev, u32 info[4]);   // see gfx11.cpp; info: [0] failed step, [1] HQD_ACTIVE after the dequeue, [2] api status of the failing frame, [3] HQD_ACTIVE after the re-map
 void rn_compute_ring_state(struct rn_device *adev, u32 out[4]);   // [0] rptr write-back word, [1] wptr word, [2] driver wptr of the mapped compute ring, all in dwords, [3] submits that had to wait for room
 void rn_compute_diag2(struct rn_device *adev, u32 out[8]);
 void rn_mes_state(struct rn_device *adev, u32 out[15]);
 void rn_gfx_constants_init(struct rn_device *adev);   // gfx_v11_0_hw_init steps between the memory hub and the CP resume (golden TCP_CNTL, read timeout, SH_MEM per VMID, doorbell ranges)
-extern u64 gMesHostLogBase;       // the MES working area in host memory (the default; rednavi_mes_host=0 for VRAM): logical offset of the host buffer (GART address minus the VRAM MC base), its CPU mapping and size
-extern volatile u8 *gMesHostMem;
-extern u64 gMesHostSize;
+// Drop software references before the caller releases the retained BO. This
+// does not stop the GPU; the owner must quiesce it before unmapping memory.
+void rn_mes_forget_workspace(void);
 void rn_hdp_flush(struct rn_device *adev);   // soc21_flush_hdp: write 0 to HDP_MEM_COHERENCY_FLUSH_CNTL and read it back
 void rn_mec_enable(struct rn_device *adev);   // MEC pipes out of reset and running, no queue
 void rn_mes_doorbell_regs(struct rn_device *adev, u32 out[12]);   // CP_MES_DOORBELL_CONTROL1..6 per MES pipe
@@ -203,6 +204,7 @@ void rn_scan_hqds(struct rn_device *adev, u32 out[33]);   // the active ME 1 que
 
 struct rn_mes_result {
     u32 step;
+    u32 workspace_error;                         // rn_mes::Error; rejected before GPU I/O when nonzero at step 0
     u32 cntl, p0_pc, p0_pc10, p1_pc, p1_pc10;     // CP_MES_CNTL and the instruction pointers of both pipes (the second 10 ms after the first)
     u32 kiq_active, kiq_doorbell_ctl, kiq_rptr;   // the MES KIQ queue (ME 3, pipe 1)
     u32 sched_active;                              // the scheduler queue (ME 3, pipe 0) loaded through MAP_QUEUES
@@ -223,11 +225,16 @@ struct rn_mes_result {
     u32 q_active, q_doorbell_ctl, fault_status;    // the legacy compute queue mapped by ADD_QUEUE
     u32 sched_version, kiq_version, sched_rptr, sched_wptr, mepc, mcause, ring_fence_late, p0_pc_end;   // diagnostics after the last stage
 };
-// Bring up the MES in stages (docs/COMPAT.md): start[] = {pipe0 start lo, hi, pipe1 start lo, hi} from the firmware headers. Needs the doorbell
-// aperture mapped (rn_doorbell_aperture_enable and rn_set_doorbell). base is a VRAM offset with 0x40000 bytes free (0x54000 when the log
-// buffer is in VRAM: gMesDbgExt with no host buffer, rednavi_mes_dbgext=2; with the host buffer of rednavi_mes_dbgext=1 the area is unused).
-void rn_mes_start(struct rn_device *adev, u64 va_base, u64 base, const struct rn_gmc *gmc, const u32 start[4], u32 max_step, void (*progress)(void *ctx, u32 step),
-                  void *ctx, struct rn_mes_result *res);   // read-only: MES control and the state of its two pipes
+// Native legacy-queue MES bootstrap (steps 1..6). The caller retains a
+// kWorkspaceBytes allocation with a real VMID0 mapping for setup, submits and
+// resets. Host CPU pointers, VRAM offsets and GPU addresses remain separate.
+// start[] is {pipe0 start lo, hi, pipe1 start lo, hi} from firmware headers.
+// Doorbell aperture must already be mapped. Unverified process-queue steps
+// >=7 and Navi33 hardware execution are rejected before any GPU I/O.
+void rn_mes_start(struct rn_device *adev, const rn_mes::Workspace &workspace,
+                  const struct rn_gmc *gmc, const u32 start[4], u32 max_step,
+                  void (*progress)(void *ctx, u32 step), void *ctx,
+                  struct rn_mes_result *res);
 void rn_gc_safe_mode(struct rn_device *adev, int enter);
 u32 rn_build_dispatch_ib(struct rn_device *adev, u32 *ib, u64 shader_va);
 

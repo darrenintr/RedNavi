@@ -94,6 +94,7 @@
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include "gfx11.h"
+#include "rn_dma_pages.h"
 #include "rn_uapi.h"
 #include "splash_1920x1080.h"
 #include "linux_info_navi32.h"
@@ -261,7 +262,6 @@ static void rnPublish(IOService *svc, const char *property, const char *const *n
     out->release();
 }
 
-static uint64_t gMesBaseUsed = 0x0C400000;   // base of the MES working area of this boot (a VRAM offset, or the logical offset of the host buffer)
 static void rnPublishOne(OSDictionary *d, const char *key, uint64_t v) {
     OSNumber *n = OSNumber::withNumber(v, 64);
     if (n) { d->setObject(key, n); n->release(); }
@@ -282,7 +282,7 @@ class RedNaviProbe : public IOService {
     // gpuVa: the buffer's address in the GART window (0 for a buffer that is not mapped there); bus: the bus address of each of its 4 KB pages, from which the user address spaces get their PTEs.
     // A VRAM buffer has no md/dma/bus: vramOff is its offset in VRAM (physically contiguous, 4 KB aligned), dom is RN_BO_VRAM or RN_BO_VRAM_VISIBLE, and a visible one has vmd, the
     // sub-range of the PCI aperture it occupies, which is what the caller maps. A slot is free when size is 0.
-    struct RNBo { IOBufferMemoryDescriptor *md; IODMACommand *dma; uint64_t gpuVa; uint32_t size; uint64_t *bus; bool gart; IOMemoryDescriptor *vmd; uint64_t vramOff; uint32_t dom; bool fixed; };
+    struct RNBo { IOBufferMemoryDescriptor *md; IODMACommand *dma; uint64_t gpuVa; uint32_t size; uint64_t *bus; bool gart; IOMemoryDescriptor *vmd; uint64_t vramOff; uint32_t dom; bool fixed; bool quarantined; };
     // VRAM that no one else in the kext uses, handed out in 4 KB pages by first fit from a sorted list of free ranges that merge when they touch. A range allocator, not a buddy
     // system: buffers come in any size up to 1 GB, a buddy system would round a 640 MB buffer up to 1 GB, and the list stays short because a buffer's neighbours are merged on free.
     struct VramPool {
@@ -2538,11 +2538,17 @@ struct RNLockGuard {
 
 void RedNaviProbe::destroyBo(int idx) {
     RNLockGuard g(boLock);
-    if (idx < 0 || idx >= static_cast<int>(kBoCap) || !bos[idx].size) return;
+    if (!bos || idx < 0 || idx >= static_cast<int>(kBoCap) || !bos[idx].size || bos[idx].quarantined) return;
     if (bos[idx].gart) {
         const uint32_t firstPage = static_cast<uint32_t>((bos[idx].gpuVa - 0x2000000000ull) / 4096);
         for (uint32_t p = 0; p < bos[idx].size / 4096; p++) rn_gart_unmap_page(&gpu, &gmcLive, firstPage + p);
-        rn_gart_flush(&gpu);
+        if (rn_gart_flush(&gpu) != 0) {
+            // The device may still cache a valid translation. Retain its DMA
+            // mapping and backing until reboot; never recycle this BO slot.
+            bos[idx].quarantined = true;
+            IOLog("RedNavi: BO %d GART invalidation timed out; backing retained until reboot\n", idx);
+            return;
+        }
     }
     if (bos[idx].dom) {
         if (!bos[idx].fixed) (bos[idx].dom == RN_BO_VRAM_VISIBLE ? visPool : devPool).release(bos[idx].vramOff, bos[idx].size);
@@ -2659,19 +2665,23 @@ void RedNaviProbe::vmUnmap(int vmid, uint64_t vaPage, uint32_t pages) {
 
 int RedNaviProbe::createHostBo(uint32_t size, bool writeCombine, bool gart) {
     RNLockGuard g(boLock);
+    if (!gpuLive || !bos || size == 0 || size > kBoMaxBytes) return -1;
     int slot = -1;
     for (uint32_t i = 0; i < boCount; i++) if (!bos[i].size) { slot = static_cast<int>(i); break; }
     if (slot < 0 && boCount < kBoCap) slot = static_cast<int>(boCount);
-    if (!gpuLive || !bos || slot < 0 || size == 0 || size > kBoMaxBytes) return -1;
+    if (slot < 0) return -1;
     size = (size + 4095u) & ~4095u;
     const uint32_t pages = size / 4096;
     if (gart && gartNextPage + pages > 16384) return -1;
     if (boBytes + size > boBudget) return -1;
     IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut | (writeCombine ? kIOMapWriteCombineCache : 0), size, 4096);
     if (!md) return -1;
-    md->prepare();
-    memset(md->getBytesNoCopy(), 0, size);
-    IODMACommand *dma = IODMACommand::withSpecification(kIODMACommandOutputHost64, 64, 0, IODMACommand::kMapped, 0, 1, nullptr, 0);
+    void *cpu = md->getBytesNoCopy();
+    if (!cpu) { md->release(); return -1; }
+    memset(cpu, 0, size);
+    // The non-pageable IOBuffer is already wired. setMemoryDescriptor prepares
+    // the DMA mapping; use the GMC11 DMA width, independently of GPU VA width.
+    IODMACommand *dma = IODMACommand::withSpecification(kIODMACommandOutputHost64, rn_dma::kGmc11DmaAddressBits, 0, IODMACommand::kMapped, 0, 4096, nullptr, 0);
     if (!dma || dma->setMemoryDescriptor(md) != kIOReturnSuccess) {
         if (dma) dma->release();
         md->release();
@@ -2683,32 +2693,48 @@ int RedNaviProbe::createHostBo(uint32_t size, bool writeCombine, bool gart) {
         md->release();
         return -1;
     }
-    uint32_t page = gartNextPage, n = 0;
-    UInt64 off = 0;
-    while (off < size) {
-        IODMACommand::Segment64 segs[8] = {};
-        UInt32 nseg = 8;
-        if (dma->genIOVMSegments(&off, segs, &nseg) != kIOReturnSuccess || nseg == 0) break;
-        for (UInt32 i = 0; i < nseg; i++)
-            for (uint64_t p = 0; p < segs[i].fLength / 4096 && n < pages; p++) {
-                bus[n++] = segs[i].fIOVMAddr + p * 4096;
-                if (gart) rn_gart_map_page(&gpu, &gmcLive, page++, bus[n - 1]);
-            }
-    }
-    if (n != pages) {                                        // a short mapping: give up on this buffer (the window pages it took stay unused)
-        if (gart) gartNextPage = page;
+    const rn_dma::Result mapping = rn_dma::collectPages<IODMACommand::Segment64>(bus, pages, size,
+        [dma](uint64_t *offset, IODMACommand::Segment64 *segments, uint32_t *count) {
+            UInt64 dmaOffset = *offset;
+            UInt32 dmaCount = *count;
+            const IOReturn status = dma->genIOVMSegments(&dmaOffset, segments, &dmaCount);
+            *offset = dmaOffset;
+            *count = dmaCount;
+            return status == kIOReturnSuccess;
+        });
+    if (!mapping.ok()) {
+        IOLog("RedNavi: host BO DMA validation failed (%u); no GART entries installed\n", static_cast<unsigned>(mapping.error));
         IOFree(bus, sizeof(uint64_t) * pages);
         dma->complete(); dma->clearMemoryDescriptor(); dma->release();
         md->release();
         return -1;
     }
-    if (gart) rn_gart_flush(&gpu);
+    // Install only after every DMA page has passed validation. Neither the
+    // GART cursor nor any valid PTE changes on an enumeration failure.
+    bool quarantined = false;
+    if (gart) {
+        for (uint32_t p = 0; p < pages; p++) rn_gart_map_page(&gpu, &gmcLive, gartNextPage + p, bus[p]);
+        if (rn_gart_flush(&gpu) != 0) {
+            for (uint32_t p = 0; p < pages; p++) rn_gart_unmap_page(&gpu, &gmcLive, gartNextPage + p);
+            if (rn_gart_flush(&gpu) == 0) {
+                IOFree(bus, sizeof(uint64_t) * pages);
+                dma->complete(); dma->clearMemoryDescriptor(); dma->release();
+                md->release();
+                return -1;
+            }
+            // Rollback could not be acknowledged. Reserve the unexposed slot
+            // and range so the device can never DMA into recycled memory.
+            quarantined = true;
+            IOLog("RedNavi: host BO GART rollback timed out; %u bytes retained until reboot\n", size);
+        }
+    }
     const int idx = slot;
     if (static_cast<uint32_t>(slot) == boCount) boCount++;
     bos[idx] = {md, dma, gart ? 0x2000000000ull + static_cast<uint64_t>(gartNextPage) * 4096 : 0, size, bus, gart};
+    bos[idx].quarantined = quarantined;
     if (gart) gartNextPage += pages;
     boBytes += size;
-    return idx;
+    return quarantined ? -1 : idx;
 }
 
 // A buffer in VRAM, from the device-local pool or, for `visible`, from the part of the aperture the CPU can reach. A visible buffer is cleared through the aperture; a device-local
@@ -2784,10 +2810,10 @@ int RedNaviProbe::createScanoutBo(uint32_t surface) {
 __attribute__((noinline)) void RedNaviProbe::publishMes(const struct rn_mes_result &mr) {
     static const char *const sn[] = {"step", "cntl", "p0_pc", "p1_pc", "kiq_active", "kiq_doorbell_ctl", "kiq_rptr", "sched_active", "ring_fence", "api_status", "hw_res_ok",
                                      "add_ok", "q_active", "q_doorbell_ctl", "fault_status", "sched_version", "kiq_version", "sched_rptr", "sched_wptr", "mepc", "mcause",
-                                     "ring_fence_late", "p0_pc_end", "q_pipe", "q_queue"};
+                                     "ring_fence_late", "p0_pc_end", "q_pipe", "q_queue", "workspace_error"};
     const uint32_t sv[] = {mr.step, mr.cntl, mr.p0_pc, mr.p1_pc, mr.kiq_active, mr.kiq_doorbell_ctl, mr.kiq_rptr, mr.sched_active, mr.ring_fence, mr.api_status,
                            static_cast<uint32_t>(mr.hw_res_ok), static_cast<uint32_t>(mr.add_ok), mr.q_active, mr.q_doorbell_ctl, mr.fault_status, mr.sched_version,
-                           mr.kiq_version, mr.sched_rptr, mr.sched_wptr, mr.mepc, mr.mcause, mr.ring_fence_late, mr.p0_pc_end, mr.q_pipe, mr.q_queue};
+                           mr.kiq_version, mr.sched_rptr, mr.sched_wptr, mr.mepc, mr.mcause, mr.ring_fence_late, mr.p0_pc_end, mr.q_pipe, mr.q_queue, mr.workspace_error};
     rnPublish(this, "mes-start", sn, sv, sizeof(sv) / sizeof(sv[0]));
     static const char *const vn[] = {"sched", "kiq", "bootload", "rlc_srm", "cp_stat", "cp_me_cntl", "mec_cntl", "rlc_sched", "hqd_active"};
     const uint32_t vv[] = {mr.fw_ver0, mr.fw_ver1, mr.bootload, mr.rlc_srm, mr.cp_stat0, mr.cp_me_cntl, mr.mec_cntl, mr.rlc_sched, mr.hqd_active};
@@ -2978,23 +3004,36 @@ void RedNaviProbe::sdmaTest() {
     if (gartTest && !hostBuf) {
         hostBuf = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous, 4 * 4096, 4096);
         if (hostBuf) {
-            hostBuf->prepare();
-            memset(hostBuf->getBytesNoCopy(), 0, 4 * 4096);
-            hostDma = IODMACommand::withSpecification(kIODMACommandOutputHost64, 64, 0, IODMACommand::kMapped, 0, 1, nullptr, 0);
-            if (hostDma && hostDma->setMemoryDescriptor(hostBuf) == kIOReturnSuccess) {
-                IODMACommand::Segment64 seg = {};
-                UInt64 off = 0;
-                UInt32 nseg = 1;
-                if (hostDma->genIOVMSegments(&off, &seg, &nseg) == kIOReturnSuccess && nseg == 1) {
-                    hostBus = seg.fIOVMAddr;
-                    hostBusLen = static_cast<uint32_t>(seg.fLength);
+            void *cpu = hostBuf->getBytesNoCopy();
+            hostDma = IODMACommand::withSpecification(kIODMACommandOutputHost64, rn_dma::kGmc11DmaAddressBits, 0, IODMACommand::kMapped, 0, 4096, nullptr, 0);
+            if (cpu && hostDma && hostDma->setMemoryDescriptor(hostBuf) == kIOReturnSuccess) {
+                uint64_t pages[4] = {};
+                const rn_dma::Result mapping = rn_dma::collectPages<IODMACommand::Segment64>(pages, 4, 4 * 4096,
+                    [this](uint64_t *offset, IODMACommand::Segment64 *segments, uint32_t *count) {
+                        UInt64 dmaOffset = *offset;
+                        UInt32 dmaCount = *count;
+                        const IOReturn status = hostDma->genIOVMSegments(&dmaOffset, segments, &dmaCount);
+                        *offset = dmaOffset;
+                        *count = dmaCount;
+                        return status == kIOReturnSuccess;
+                    });
+                // The diagnostic below deliberately uses base + page offsets.
+                // A contiguous CPU allocation does not establish DMA contiguity.
+                if (mapping.ok() && pages[1] == pages[0] + 4096 && pages[2] == pages[0] + 8192 && pages[3] == pages[0] + 12288) {
+                    memset(cpu, 0, 4 * 4096);
+                    hostBus = pages[0];
+                    hostBusLen = 4 * 4096;
                 }
             }
             const char *hn[5] = {"buf_ok", "dma_ok", "bus_lo", "bus_hi", "seg_len"};
-            uint32_t hv[5] = {1, hostDma != nullptr, static_cast<uint32_t>(hostBus), static_cast<uint32_t>(hostBus >> 32), hostBusLen};
+            uint32_t hv[5] = {1, hostBusLen == 4 * 4096, static_cast<uint32_t>(hostBus), static_cast<uint32_t>(hostBus >> 32), hostBusLen};
             rnPublish(this, "gart-info", hn, hv, 5);
+            if (hostBusLen != 4 * 4096) {
+                if (hostDma) { hostDma->complete(); hostDma->clearMemoryDescriptor(); hostDma->release(); hostDma = nullptr; }
+                hostBuf->release(); hostBuf = nullptr;
+            }
         }
-        for (uint32_t pg = 0; hostBus && pg < 4 && (pg + 1) * 4096u <= hostBusLen; pg++) rn_gart_map_page(&gpu, &gmc, pg, hostBus + pg * 4096ull);
+        for (uint32_t pg = 0; hostBusLen == 4 * 4096 && pg < 4; pg++) rn_gart_map_page(&gpu, &gmc, pg, hostBus + pg * 4096ull);
     }
     rn_gfxhub_enable(&gpu, &gmc);
     {   // Opt-in (rednavi_mmhub=1): mmhub_v3_0_gart_enable after the gfxhub, as gmc_v11_0_gart_enable does; before/after of its main registers go to "mmhub-gart".
@@ -3067,7 +3106,7 @@ void RedNaviProbe::sdmaTest() {
                       res.version, res.cntl, res.power_cntl, res.checksum, res.freeze, res.chicken, res.program, res.ring0, res.ring3, res.rptr_shadow, res.wptr_shadow};
     rnPublish(this, "sdma-test", n, v, 25);
 
-    if (gartTest && hostBus) {
+    if (gartTest && hostBusLen == 4 * 4096) {
         // System memory through the GART: SDMA writes a dword into the host page, and copies another one from it into VRAM.
         volatile uint32_t *host = static_cast<volatile uint32_t *>(hostBuf->getBytesNoCopy());
         host[0] = 0xAAAA0000u; host[1] = 0x55667788u;
@@ -3235,7 +3274,7 @@ void RedNaviProbe::sdmaTest() {
                 uint32_t store = 0;
                 PE_parse_boot_argn("rednavi_dispatch_store", &store, sizeof(store));   // 1: the shader stores a dword, 0: s_endpgm only
                 uint32_t dispGart = 0;
-                const bool toHost = gartTest && hostBus && PE_parse_boot_argn("rednavi_dispatch_gart", &dispGart, sizeof(dispGart)) && dispGart == 1;
+                const bool toHost = gartTest && hostBusLen == 4 * 4096 && PE_parse_boot_argn("rednavi_dispatch_gart", &dispGart, sizeof(dispGart)) && dispGart == 1;
                 volatile uint32_t *hostWord = toHost ? static_cast<volatile uint32_t *>(hostBuf->getBytesNoCopy()) + 2 : nullptr;   // dword 2 of the host page
                 rn_compute_dispatch_test(&gpu, kRNVramMcBase, 0x0C020000, 0x0C030000, 0x0C031000, store == 1 ? 0x0C032000 : 0,
                                          toHost ? kGartVa + 8 : 0, hostWord, ih ? 2 : 0, msi ? &RedNaviProbe::waitMsi : nullptr, this, &dr);
@@ -3277,23 +3316,25 @@ void RedNaviProbe::sdmaTest() {
             if (PE_parse_boot_argn("rednavi_mes_step", &mesStep, sizeof(mesStep)) && mesStep >= 1) {
                 static struct rn_mes_result mr;      // static: the kernel stack of sdmaTest is nearly full
                 const uint32_t start[4] = {kRNMes0StartLo, kRNMes0StartHi, kRNMes1StartLo, kRNMes1StartHi};
-                uint64_t mesBase = 0x0C400000;   // VRAM mode: above the SMU tables (0x0C300000) and well clear of the GART page table at 0x0C100000
-                gMesHostMem = nullptr; gMesHostSize = 0; gMesHostLogBase = 0;
-                {   // The MES working memory lives in host memory behind the GART, as in Linux (see gfx11.cpp); rednavi_mes_host=0 puts it in VRAM instead.
+                rn_mes::Workspace workspace;
+                if (mesStep < 7) {   // Step 7's process/GPUVM path is rejected before allocating or mapping a MES workspace.
                     uint32_t mh = 1;
                     PE_parse_boot_argn("rednavi_mes_host", &mh, sizeof(mh));
                     if (mh != 0) {
-                        const int hb = createHostBo(0xB0000, true);   // write-combined: the CPU's stores go to memory without waiting in a cache line the GPU would have to snoop
+                        const int hb = createHostBo(static_cast<uint32_t>(rn_mes::kWorkspaceBytes), true);
                         if (hb >= 0) {
-                            gMesHostMem = static_cast<volatile uint8_t *>(bos[hb].md->getBytesNoCopy());
-                            gMesHostSize = 0xB0000;
-                            gMesHostLogBase = bos[hb].gpuVa - kRNVramMcBase;
-                            mesBase = gMesHostLogBase;
+                            workspace = rn_mes::Workspace::host(rn_mes::GpuVa(bos[hb].gpuVa), bos[hb].md->getBytesNoCopy(), bos[hb].size);
+                        } else {
+                            IOLog("RedNavi: MES host workspace allocation failed\n");
                         }
+                    } else {
+                        // Explicit VRAM mode: separate CPU aperture offset and
+                        // device address, above SMU tables and the GART table.
+                        workspace = rn_mes::Workspace::vram(rn_mes::GpuVa(kRNVramMcBase + 0x0C400000ull),
+                                                          rn_mes::VramOffset(0x0C400000), rn_mes::kWorkspaceBytes);
                     }
                 }
-                gMesBaseUsed = mesBase;
-                rn_mes_start(&gpu, kRNVramMcBase, mesBase, &gmc, start, mesStep,
+                rn_mes_start(&gpu, workspace, &gmc, start, mesStep,
                                  [](void *ctx, uint32_t step) {
                                      RedNaviProbe *self = static_cast<RedNaviProbe *>(ctx);
                                      const char *pn[1] = {"about_to_run"};
@@ -3316,7 +3357,7 @@ void RedNaviProbe::sdmaTest() {
                         gfxQueueOk = gr.step >= 7;
                     }
                 }
-                if ((mr.q_active & 1u) || mr.add_ok) computeRingOff = gMesBaseUsed + 0x40000;   // the queue the MES mapped
+                if ((mr.q_active & 1u) || mr.add_ok) computeRingOff = rn_mes::kComputeBlock;   // relative to the retained MES workspace
                 if (mesClean == 1 && ((mr.q_active & 1u) || mr.add_ok)) cr.ok = 1;
                 if (mesClean == 2) {      // the MES is up (step 4): now a hand-programmed queue, to see whether it survives with the MES running
                     rn_compute_ring_test(&gpu, kRNVramMcBase, 0x0C020000, 4096, &cr);
@@ -3355,7 +3396,7 @@ void RedNaviProbe::sdmaTest() {
             // Opt-in (rednavi_bo_test=1): two buffers in host memory, a shader and its command buffer in the first, the result and the fence in
             // the second; the command buffer is submitted through an INDIRECT_BUFFER packet and the fence is read from host memory.
             uint32_t boArg = 0;
-            if (cr.ok && gartTest && hostBus && PE_parse_boot_argn("rednavi_bo_test", &boArg, sizeof(boArg)) && boArg == 1) {
+            if (cr.ok && gartTest && hostBusLen == 4 * 4096 && PE_parse_boot_argn("rednavi_bo_test", &boArg, sizeof(boArg)) && boArg == 1) {
                 const int a = createHostBo(4096), b = createHostBo(4096);
                 uint32_t r[8] = {static_cast<uint32_t>(a), static_cast<uint32_t>(b), 0, 0, 0, 0, 0, 0};
                 if (a >= 0 && b >= 0) {
@@ -3890,13 +3931,20 @@ bool RedNaviProbe::start(IOService *provider) {
 }
 
 void RedNaviProbe::stop(IOService *provider) {
+    // Until engine shutdown/drain is implemented, the GPU may still own any
+    // published host allocation. Dropping software state cannot revoke DMA.
+    const bool retainDma = gpuLive;
+    gpuLive = false;
+    if (watchTimer) { watchTimer->cancelTimeout(); if (getWorkLoop()) getWorkLoop()->removeEventSource(watchTimer); watchTimer->release(); watchTimer = nullptr; }
+    if (msiSrc) { msiSrc->disable(); if (getWorkLoop()) getWorkLoop()->removeEventSource(msiSrc); msiSrc->release(); msiSrc = nullptr; }
+    if (retainDma) rn_mes_forget_workspace();   // this provider's native path; software references only, not GPU quiescence
     if (modeLock) { IOLockFree(modeLock); modeLock = nullptr; }
     rn_compute_lock_free();
     if (disc) { disc->release(); disc = nullptr; }
     if (vbiosCopy) { vbiosCopy->release(); vbiosCopy = nullptr; }
-    if (watchTimer) { watchTimer->cancelTimeout(); if (getWorkLoop()) getWorkLoop()->removeEventSource(watchTimer); watchTimer->release(); watchTimer = nullptr; }
-    if (msiSrc) { msiSrc->disable(); if (getWorkLoop()) getWorkLoop()->removeEventSource(msiSrc); msiSrc->release(); msiSrc = nullptr; }
+    if (retainDma) IOLog("RedNavi: GPU shutdown not verified; host DMA backing retained until reboot\n");
     for (uint32_t i = 0; bos && i < boCount; i++) {
+        if (bos[i].quarantined || (retainDma && bos[i].md)) continue;
         if (bos[i].dma) { bos[i].dma->complete(); bos[i].dma->clearMemoryDescriptor(); bos[i].dma->release(); }
         if (bos[i].md) bos[i].md->release();
         if (bos[i].vmd) bos[i].vmd->release();
@@ -3907,8 +3955,8 @@ void RedNaviProbe::stop(IOService *provider) {
     if (boLock) { IOLockFree(boLock); boLock = nullptr; }
     if (queueLock) { IOLockFree(queueLock); queueLock = nullptr; }
     if (doorbellKeep) { rn_set_doorbell(nullptr, 0); doorbellKeep->release(); doorbellKeep = nullptr; }
-    if (hostDma) { hostDma->complete(); hostDma->clearMemoryDescriptor(); hostDma->release(); hostDma = nullptr; }
-    if (hostBuf) { hostBuf->release(); hostBuf = nullptr; }
+    if (!retainDma && hostDma) { hostDma->complete(); hostDma->clearMemoryDescriptor(); hostDma->release(); hostDma = nullptr; }
+    if (!retainDma && hostBuf) { hostBuf->release(); hostBuf = nullptr; }
     if (regs) { regs->release(); regs = nullptr; }
     IOService::stop(provider);
 }
