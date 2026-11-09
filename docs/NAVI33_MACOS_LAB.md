@@ -196,3 +196,67 @@ codesign --verify build/Debug/RedNaviNavi33Diag.kext
 **Do not run** `kmutil install`, `kextload`, or inject this Kext into
 OpenCore EFI on a sole-display RX 7600 yet. This component has not been
 loaded on the real machine. CI compilation is not GPU runtime validation.
+
+
+## Existing RedNavi Navi33 hardware path: opt-in P4 build (not a new port)
+
+Cobalt64's proven RX7600 parameters and much of the Navi33 host
+implementation were already integrated into RedNavi. The next blocker
+is **runtime wiring**, not more parameter copying.
+
+The current `RedNaviProbe::start()` has a separate `1002:7480` case
+which performs GPU IP Discovery, MMHUB/FB_LOCATION readback, PSP/SMU
+mailbox preflight, and publishes `navi33-*` IORegistry properties.
+It then returns **before the legacy Navi32 PSP, GART, SDMA, DCN or MES
+runtime**. This is intentionally not a Navi33 compute/Metal implementation.
+
+The production `RedNavi.kext` does not match RX7600. A distinct
+**explicitly experimental** bundle reuses the **same** RedNavi source
+without importing any Cobalt64 code or rerunning parameter migration:
+
+```sh
+cd ~/RedNavi
+git pull --ff-only
+make test
+make DEBUG=1 navi33-p4
+codesign --verify build/Debug/RedNaviNavi33P4.kext
+```
+
+- The separate bundle has `org.rednavi.Navi33P4` and only matches
+  `1002:7480` with `IOMatchCategory=RedNaviP4Experimental`, **not**
+  `IOFramebuffer`.
+- Its `kern_probe.cpp` is compiled with
+  `RN_ENABLE_NAVI33_UNSAFE_P4`, but the runtime still rejects GPU
+  hardware access unless **the exact boot argument**
+  `rednavi_navi33_unsafe_p4=1` is also present.
+- Unlike the simple metadata observer, this path **modifies PCI
+  memory-enable state and writes MM_INDEX/MM_INDEX_HI** during
+  discovery. It can hang or disturb the sole video card.
+- The build target is **not** in `make all`, normal Kext artifacts,
+  the boot EFI or any automatic install routine.
+- CI compiles both Debug and Release experimental bundles, but does
+  not publish or inject them. The host tests assert compile/boot
+  admission and separate matching category.
+- There is **no** claim of successful live P4 readback until a
+  deliberate boot test produces `navi33-discovery-error=0` and
+  readback evidence. No Kext has been installed or injected by this
+  change.
+
+Do not add the P4 bundle to the known-good OpenCore EFI. Use only a
+separate, recoverable **test EFI**, and keep the clean boot path
+available. Never co-install the normal RedNavi and P4 bundles; both
+contain `RedNaviProbe` runtime classes. On the sole-display RX7600
+you should also have an independently proven recovery procedure
+before taking this risk.
+
+### Next verified hardware checkpoint
+
+Once the user deliberately boots the test variant (not CI), collect
+the P4/P5/P6 IORegistry fields and capture exact readback from
+`navi33-memory-preflight`, `navi33-address-space-audit`,
+`navi33-firmware-preflight`, `navi33-linux-boot-preflight`.
+Only after those checks can we wire the existing Navi33 PSP/GART/MES
+implementation into the RedNavi runtime. The historical Cobalt64
+compute proof was in a specific RX7600 GPU-passthrough environment;
+its absolute GPU VM/VRAM ownership must be revalidated on bare-metal
+Sequoia.
