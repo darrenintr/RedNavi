@@ -1641,6 +1641,14 @@ void rn_mes_start(struct rn_device *adev, u64 vaBase, u64 base, const struct rn_
     static_assert(sizeof(union MESAPI_SET_HW_RESOURCES) == 256 && sizeof(union MESAPI__ADD_QUEUE) == 256 &&
                   sizeof(union MESAPI__QUERY_MES_STATUS) == 256, "MES API frames are 64 dwords");
     memset(res, 0, sizeof(*res));
+    // RX7800XT M4 uses a shared, linear (vaBase + offset) queue layout.
+    // Navi33 cannot safely reuse it: ME3 queue/GART addresses must come
+    // from independent GPU-VA leases after PSP13.0.7 and GMC11.0.2.
+    // A dedicated Navi33 M4 adapter will supersede this guard.
+    if (adev->gfxhub_variant == RN_GFXHUB_NAVI33_V3_0) {
+        IOLog("RedNavi: refusing RX7800XT MES layout on Navi33 (requires typed BO/VM leases)\n");
+        return;
+    }
     res->bootload = RREG32_SOC15(RN_GC, 0, regRLC_RLCS_BOOTLOAD_STATUS);        // gfx_v11_0_wait_for_rlc_autoload_complete wants BOOTLOAD_COMPLETE (bit 31) and CP_STAT 0
     res->rlc_srm = RREG32_SOC15(RN_GC, 0, regRLC_SRM_CNTL);
     res->cp_stat0 = RREG32_SOC15(RN_GC, 0, regCP_STAT);
@@ -2466,6 +2474,9 @@ out:
 
 void rn_gfx_queue_map(struct rn_device *adev, struct rn_gfxq_result *res) {
     memset(res, 0, sizeof(*res));
+    // The existing graphics-ring queue block is part of the Navi32 M4
+    // linear MES memory convention; do not reuse it on GC11.0.2.
+    if (adev->gfxhub_variant == RN_GFXHUB_NAVI33_V3_0) return;
     if (!gMesCtx.valid || !gDoorbellBase) return;
     const u64 vaBase = gMesCtx.vaBase, blk = gMesCtx.qOff + 0x5C000;       // after the MES event log (base + 0x50000 .. 0x94000)
     gGfxBlk = blk;
