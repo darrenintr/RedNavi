@@ -9,6 +9,16 @@
 
 namespace rn_navi33 {
 
+// RX 7600 (Navi33) reports MMHUB IP 3.0.2, whose register layout is NOT
+// identical to Navi32's MMHUB 3.0.0. All offsets are DWORDs relative to
+// MMHUB segment 0 from the device's validated IP Discovery table.
+// Source: Linux asic_reg/mmhub/mmhub_3_0_2_offset.h.
+namespace mmhub_v3_0_2 {
+constexpr uint32_t kFbLocationBaseDword = 0x086cu;
+constexpr uint32_t kFbLocationTopDword  = 0x086du;
+constexpr uint32_t kFbOffsetDword       = 0x0857u;
+} // namespace mmhub_v3_0_2
+
 enum class MemoryError : uint8_t {
     Ok, NoVram, BadLocation, WindowTooSmall, InvalidBar
 };
