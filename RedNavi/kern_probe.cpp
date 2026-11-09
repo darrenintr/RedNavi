@@ -3754,7 +3754,7 @@ bool RedNaviProbe::start(IOService *provider) {
                     gpu.reg_offset[RN_DCE_HWIP][0][i] = ips.dmu.dwords[i];
                 setProperty("navi33-ip-bases-ready", true);
 
-                // P5 preflight reads actual MMHUB FB_LOCATION_BASE/TOP/OFFSET
+                // P5 preflight reads MMHUB 3.0.2 FB_LOCATION_BASE/TOP/OFFSET.\n                // Navi33 uses different DWORD offsets from MMHUB 3.0.0.
                 // and firmware mailbox status. No Navi32 constant is used.
                 // These reads access real GPU registers, not host fixtures.
                 auto readBar = [&](uint32_t base, uint32_t dword, uint32_t *out) -> bool {
@@ -3769,9 +3769,9 @@ bool RedNaviProbe::start(IOService *provider) {
                     kIOPCIConfigBaseAddress0 + kRNVramBar * 4);
                 const uint64_t bar0Bytes = aperture ? aperture->getLength() : 0;
                 const bool mmhubRead =
-                    readBar(ips.mmhub.dwords[0], 0x8ec, &fbBase) &&
-                    readBar(ips.mmhub.dwords[0], 0x8ed, &fbTop) &&
-                    readBar(ips.mmhub.dwords[0], 0x8d7, &fbOffset);
+                    readBar(ips.mmhub.dwords[0], rn_navi33::mmhub_v3_0_2::kFbLocationBaseDword, &fbBase) &&
+                    readBar(ips.mmhub.dwords[0], rn_navi33::mmhub_v3_0_2::kFbLocationTopDword, &fbTop) &&
+                    readBar(ips.mmhub.dwords[0], rn_navi33::mmhub_v3_0_2::kFbOffsetDword, &fbOffset);
                 bool p6MemoryVerified = false;
                 uint32_t gfxFbOffsetRaw = 0;
                 const bool gfxFbOffsetRead = readBar(
