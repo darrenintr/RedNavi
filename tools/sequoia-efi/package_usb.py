@@ -34,8 +34,8 @@ def main():
                "-m", "00000000000000000", "download"]
         print("Downloading official macOS Sequoia Recovery using:", " ".join(cmd),flush=True)
         subprocess.run(cmd, cwd=p, check=True, timeout=1200)
-        candidates = list(p.glob("*.dmg"))
-        chunklists = list(p.glob("*.chunklist"))
+        candidates = list(p.rglob("*.dmg"))
+        chunklists = list(p.rglob("*.chunklist"))
         assert len(candidates) == 1 and len(chunklists) == 1,             "Expected one .dmg and one .chunklist"
         dmg = candidates[0]
         chunk = chunklists[0]
