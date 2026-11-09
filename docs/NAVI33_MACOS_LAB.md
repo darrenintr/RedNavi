@@ -152,28 +152,47 @@ non-resetting probe and audit every read/write in it before any test run.
 
 ### P4 probe admission now fails closed by default
 
-The default \`RedNavi.kext\` build is **not a hardware test**. The
-\`RedNaviProbe::start()\` Navi33-specific early gate runs before
-\`setMemoryEnable(true)\`, BAR5 mapping, IP Discovery, and any MM_INDEX
+The default `RedNavi.kext` build is **not a hardware test**. The
+`RedNaviProbe::start()` Navi33-specific early gate runs before
+`setMemoryEnable(true)`, BAR5 mapping, IP Discovery, and any MM_INDEX
 writes. With ordinary Debug/Release builds the gate returns
-\`DisabledInBuild\` even if an old boot-argument was left behind.
+`DisabledInBuild` even if an old boot-argument was left behind.
 
-An experimental compilation flag \`RN_ENABLE_NAVI33_UNSAFE_P4\` AND
-the exact \`rednavi_navi33_unsafe_p4=1\` boot argument would both be needed
+An experimental compilation flag `RN_ENABLE_NAVI33_UNSAFE_P4` AND
+the exact `rednavi_navi33_unsafe_p4=1` boot argument would both be needed
 to reach the legacy risky path. **Do not enable either on the sole-display
 Sequoia machine.** This is an accidental-I/O gate, not a promise that
-matching a Kext to an active GPU is harmless. In particular, the existing
-\`IOPCIPrimaryMatch\` still includes \`1002:7480\` and
-\`IOMatchCategory=IOFramebuffer\`; attaching it could interfere with the
-firmware framebuffer before the early start guard runs. Do not install or
-inject RedNavi into the known-good boot EFI.
+matching a Kext to an active GPU is harmless. The legacy `RedNavi.kext` personality now intentionally **excludes**
+`1002:7480` from `IOFramebuffer` matching. The new
+`RedNaviNavi33Diag.kext` has its own `RedNaviDiagnostic` category and only
+matches `1002:7480`. A distinct matching category reduces framebuffer
+driver competition, but does **not** prove attaching a Kext is safe.
 
-Host test: \`tests/host/navi33_probe_admission_test.cpp\` checks that a
+Host test: `tests/host/navi33_probe_admission_test.cpp` checks that a
 normal build cannot opt in and a hypothetical experimental build still
 rejects missing or unexpected boot-argument values. These tests perform
 no hardware I/O.
 
-Next bring-up task is to design a separate non-framebuffer IOKit
-diagnostic personality and to audit all register-access/read-side
-effects before trying any hardware read. Only then, with an independent
-recovery method, consider explicit P4 tests.
+Next bring-up task is to audit register-access/read-side effects and
+prepare an independent recovery method before any GPU hardware read.
+
+
+### Independent diagnostic Kext: compile only, never load by default
+
+The experimental metadata observer uses `IOPCIDevice::configRead16` and
+`getDeviceMemoryWithRegister` to read **PCI resource metadata only**.
+It does not map BAR5, write PCI command flags, modify MM_INDEX, load
+firmware, configure GPU VM, reset the GPU, or claim the framebuffer.
+It is excluded from `make all` and is not packaged in CI artifacts.
+
+```sh
+cd ~/RedNavi
+git pull --ff-only
+make test
+make DEBUG=1 diag
+codesign --verify build/Debug/RedNaviNavi33Diag.kext
+```
+
+**Do not run** `kmutil install`, `kextload`, or inject this Kext into
+OpenCore EFI on a sole-display RX 7600 yet. This component has not been
+loaded on the real machine. CI compilation is not GPU runtime validation.
