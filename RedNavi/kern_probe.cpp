@@ -3675,12 +3675,12 @@ bool RedNaviProbe::start(IOService *provider) {
             vendorId, deviceId, kExperimentalP4Built, explicitOptIn);
         if (admission != rn_navi33::ProbeAdmission::ExperimentalOnly) {
             IOLog("RedNavi: RX7600 hardware P4 refused (reason %u); "
-                  "no BAR mapping, PCI memory-enable or MM_INDEX access\\n",
+                  "no BAR mapping, PCI memory-enable or MM_INDEX access\n",
                   static_cast<unsigned>(admission));
             return false;
         }
         IOLog("RedNavi: WARNING unsafe Navi33 P4 explicitly enabled; "
-              "this may hang the sole GPU/display\\n");
+              "this may hang the sole GPU/display\n");
     }
 
     modeLock = IOLockAlloc();
