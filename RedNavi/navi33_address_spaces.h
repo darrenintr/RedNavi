@@ -12,7 +12,8 @@ namespace rn_navi33 { namespace address {
 
 template <typename Tag> struct Address {
     uint64_t value;
-    explicit constexpr Address(uint64_t v = 0) : value(v) {}
+    constexpr Address() : value(0) {}
+    explicit constexpr Address(uint64_t v) : value(v) {}
 };
 struct VramOffsetTag {};
 struct GpuMcTag {};        // FB_LOCATION_BASE + VRAM offset; GPU MC aperture
