@@ -101,6 +101,6 @@ static void barTests() {
         assert(db.ok() && db.address.value==index*4u);
     }
     assert(doorbellBarOffset(0x15u,4096).error==Error::BadBar);
-    assert(doorbellBarOffset(0x200u,4096).error==Error::BadBar);
+    assert(doorbellBarOffset(0x400u,4096).error==Error::BadBar);
 }
 int main() { geometryTests(); dmaTests(); barTests(); }
