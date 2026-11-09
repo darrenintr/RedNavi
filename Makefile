@@ -170,5 +170,10 @@ test:
 	./build/navi33_runtime_test
 	clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_bootstrap_test.cpp -o build/navi33_bootstrap_test
 	./build/navi33_bootstrap_test
+	clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p6_psp_test.cpp -o build/navi33_p6_psp_test
+	./build/navi33_p6_psp_test
+	clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p6_staging_test.cpp -o build/navi33_p6_staging_test
+	./build/navi33_p6_staging_test
+	python3 -m unittest discover -s tests/host -p 'navi33_p6_firmware_audit_test.py'
 
 .PHONY: all clean test mtl
