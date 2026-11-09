@@ -3754,9 +3754,9 @@ bool RedNaviProbe::start(IOService *provider) {
                     gpu.reg_offset[RN_DCE_HWIP][0][i] = ips.dmu.dwords[i];
                 setProperty("navi33-ip-bases-ready", true);
 
-                // P5 preflight reads MMHUB 3.0.2 FB_LOCATION_BASE/TOP/OFFSET.\n                // Navi33 uses different DWORD offsets from MMHUB 3.0.0.
-                // and firmware mailbox status. No Navi32 constant is used.
-                // These reads access real GPU registers, not host fixtures.
+                // P5 reads Navi33 MMHUB 3.0.2 FB_LOCATION_BASE/TOP/OFFSET.
+                // Register offsets come from mmhub_3_0_2_offset.h, not MMHUB 3.0.0.
+                // PSP/SMU mailbox status is reported separately. These are live GPU reads.
                 auto readBar = [&](uint32_t base, uint32_t dword, uint32_t *out) -> bool {
                     uint32_t byteOff = 0;
                     if (!rn_navi33::checkedBarDword(base, dword, regs->getLength(), &byteOff))
