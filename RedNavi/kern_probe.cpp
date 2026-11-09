@@ -101,6 +101,7 @@
 #include "navi33_runtime.h"
 #include "navi33_bootstrap.h"
 #include "navi33_p6_psp_preflight.h"
+#include "navi33_linux_boot_parity.h"
 
 #ifdef RN_HAVE_PSP_FW
 #include "psp_fw.h"
@@ -3745,6 +3746,27 @@ bool RedNaviProbe::start(IOService *provider) {
                 };
                 rnPublish(this, "navi33-p6-psp-preflight", p6names,
                           p6values, sizeof(p6values) / sizeof(p6values[0]));
+                // Linux GC11.0.2 boot-parity preflight. This is a read-only
+                // status report; it does not substitute for a real PSP,
+                // GMC11 or MES KIQ/Scheduler hardware initialization.
+                const rn_navi33::linux_boot::Snapshot linuxSnapshot{
+                    check.eligibleForComputeBringup(), true, p6MemoryVerified,
+                    pspRead, gate.ifwiReady, gate.secureOsAlive
+                };
+                const auto linuxPreflight = rn_navi33::linux_boot::inspect(linuxSnapshot);
+                const char *const linuxNames[] = {
+                    "blocker", "observation_mask", "hardware_init_allowed"
+                };
+                const uint32_t linuxValues[] = {
+                    static_cast<uint32_t>(linuxPreflight.blocker),
+                    linuxPreflight.observationMask,
+                    static_cast<uint32_t>(linuxPreflight.hardwareInitAllowed)
+                };
+                rnPublish(this, "navi33-linux-boot-preflight", linuxNames,
+                          linuxValues, sizeof(linuxValues) / sizeof(linuxValues[0]));
+                // A valid IP Discovery / sOS mailbox does not establish a
+                // retained MES ring, usable GPUVM or exclusive GPU owner.
+                setProperty("navi33-linux-boot-hw-writes", false);
                 IOLog("RedNavi: Navi33 P6.1 PSP status %u (NO PSP GPU commands)\n",
                       static_cast<unsigned>(gate.status));
                 IOLog("RedNavi: Navi33 PSP status: IFWI=0x%08x sOS=0x%08x SMU=0x%08x (no commands sent)\n",

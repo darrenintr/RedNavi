@@ -174,6 +174,8 @@ test:
 	./build/navi33_p6_psp_test
 	clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p6_staging_test.cpp -o build/navi33_p6_staging_test
 	./build/navi33_p6_staging_test
+	clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_linux_boot_parity_test.cpp -o build/navi33_linux_boot_parity_test
+	./build/navi33_linux_boot_parity_test
 	python3 -m unittest discover -s tests/host -p 'navi33_p6_firmware_audit_test.py'
 
 .PHONY: all clean test mtl
