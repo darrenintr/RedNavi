@@ -1,0 +1,65 @@
+name: Build Sequoia USB EFI (TUF B450M / Ryzen 3600)
+
+on:
+  push:
+    branches:
+      - feature/sequoia-efi-actions
+    paths:
+      - 'tools/sequoia-efi/**'
+      - '.github/workflows/sequoia-efi.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Download official binaries, validate, and package EFI
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build EFI and run official OpenCore 1.0.8 ocvalidate
+        shell: pwsh
+        run: python tools/sequoia-efi/build_efi.py
+
+      - name: Verify ZIP content
+        shell: pwsh
+        run: |
+          @'
+          import pathlib, zipfile
+          path = pathlib.Path("tools/sequoia-efi/output/EFI-Sequoia-TUF-B450M.zip")
+          assert path.is_file() and path.stat().st_size > 1000000, "Missing/undersized EFI artifact"
+          with zipfile.ZipFile(path) as z:
+              names = set(z.namelist())
+          for required in [
+              "EFI/BOOT/BOOTx64.efi",
+              "EFI/OC/OpenCore.efi",
+              "EFI/OC/config.plist",
+              "EFI/OC/Drivers/OpenRuntime.efi",
+              "EFI/OC/Drivers/HfsPlus.efi",
+              "EFI/OC/ACPI/SSDT-EC-USBX-DESKTOP.aml",
+              "EFI/OC/Kexts/Lilu.kext/Contents/Info.plist",
+              "EFI/OC/Kexts/VirtualSMC.kext/Contents/Info.plist",
+              "EFI/OC/Kexts/WhateverGreen.kext/Contents/Info.plist",
+              "EFI/OC/Kexts/RealtekRTL8111.kext/Contents/Info.plist",
+              "EFI/OC/Kexts/AppleALC.kext/Contents/Info.plist",
+          ]:
+              assert required in names, f"Missing {required}"
+          print(f"Verified {len(names)} EFI files in {path}")
+          '@ | python -
+
+      - name: Upload complete EFI.zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sequoia-EFI-ASUS-TUF-B450M-PLUS-GAMING
+          path: tools/sequoia-efi/output/EFI-Sequoia-TUF-B450M.zip
+          if-no-files-found: error
+          retention-days: 30
