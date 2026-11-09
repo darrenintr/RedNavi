@@ -152,6 +152,29 @@ $(DIAGKEXT): $(OUT)/navi33_diag.o $(OUT)/navi33_diag_info.o RedNaviDiag/Info.pli
 
 diag: $(DIAGKEXT)
 
+# EXPERIMENTAL: compile the already-integrated RedNavi P4/P5/P6 code in a
+# separate bundle and non-framebuffer IOKit match category. Not in 'all',
+# not released, not injected by CI. Does NOT enable PSP/MES/Metal.
+# Runtime additionally requires rednavi_navi33_unsafe_p4=1 at boot.
+P4KEXT := $(OUT)/RedNaviNavi33P4.kext
+$(OUT)/navi33_p4_kern_probe.o: RedNavi/kern_probe.cpp $(wildcard RedNavi/*.h compat/include/*/*.h)
+	@mkdir -p $(OUT)
+	$(CXX) $(CXXFLAGS) -DRN_ENABLE_NAVI33_UNSAFE_P4 -c $< -o $@
+
+$(OUT)/navi33_p4_kern_info.o: RedNaviP4/kern_info.c
+	@mkdir -p $(OUT)
+	clang $(ARCH) $(OPT) -mkernel -nostdinc -isystem $(SDK)/Headers -DKERNEL -mmacosx-version-min=12.0 -c $< -o $@
+
+$(P4KEXT): $(OUT)/navi33_p4_kern_probe.o $(OUT)/smu13.o $(OUT)/gfx11.o $(OUT)/edid.o $(OUT)/mode_regs.o $(COMPAT_OBJ) $(OUT)/navi33_p4_kern_info.o RedNaviP4/Info.plist.in
+	@mkdir -p $(P4KEXT)/Contents/MacOS
+	$(CXX) $(LDFLAGS) $(OUT)/navi33_p4_kern_probe.o $(OUT)/smu13.o $(OUT)/gfx11.o $(OUT)/edid.o $(OUT)/mode_regs.o $(COMPAT_OBJ) $(OUT)/navi33_p4_kern_info.o -o $(P4KEXT)/Contents/MacOS/RedNaviNavi33P4
+	@if nm -u $(P4KEXT)/Contents/MacOS/RedNaviNavi33P4 | grep -E "RedNavi|rn_|kRN|^ *_g[A-Z]" | grep -vE "_g(IO|OS)"; then echo "unresolved RedNavi P4 symbols"; exit 1; fi
+	cp RedNaviP4/Info.plist.in $(P4KEXT)/Contents/Info.plist
+	$(call SIGN,$(P4KEXT))
+	@echo "built $(P4KEXT) (P4 EXPERIMENTAL; NOT SAFE TO AUTO-INJECT)"
+
+navi33-p4: $(P4KEXT)
+
 # The Metal plug-in stub (user space, docs/M6_ACCELERATOR_STUDY.md) and the program that makes Metal load it.
 MTLBUNDLE := $(OUT)/RedNaviMTLDriver.bundle
 $(MTLBUNDLE): RedNaviMTL/plugin.m RedNaviMTL/compute.m RedNaviMTL/metallib.c RedNaviMTL/rn_air.c RedNaviMTL/rn_vk.c RedNaviMTL/rn_vk_selftest.c $(wildcard RedNaviMTL/*.h) RedNaviMTL/Info.plist
@@ -223,4 +246,4 @@ test:
 check-kernel-firmware:
 	$(CXX) $(CXXFLAGS) -DRN_HAVE_GC_FW -DRN_COMPILE_ONLY_FIRMWARE -Itests/compile -fsyntax-only RedNavi/kern_probe.cpp
 
-.PHONY: all clean test mtl diag check-kernel-firmware
+.PHONY: all clean test mtl diag navi33-p4 check-kernel-firmware
