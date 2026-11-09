@@ -177,11 +177,11 @@ inline Result<DmaIovaTag> hostDmaAddress(const DmaSegment& s,
                                         uint64_t align = 4096) {
     if (!s.memoryWired || !s.dmaMappingConfirmed || !s.ownerRetainsMapping)
         return {Error::NoDmaMapping, {}};
-    if (!alignOk(s.bus.value + offset, align))
-        return {Error::BadAlignment, {}};
     if (!validSpan(offset, bytes, s.bytes) ||
         !validSpan(s.bus.value, s.bytes, kAddressMax48))
         return {Error::OutsideBar, {}};
+    if (!alignOk(s.bus.value + offset, align))
+        return {Error::BadAlignment, {}};
     return {Error::Ok, DmaIova(s.bus.value + offset)};
 }
 
