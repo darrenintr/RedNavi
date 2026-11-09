@@ -102,6 +102,8 @@
 #include "navi33_bootstrap.h"
 #include "navi33_p6_psp_preflight.h"
 #include "navi33_linux_boot_parity.h"
+#include "navi33_address_spaces.h"
+#include "navi33_m4_asic.h"
 
 #ifdef RN_HAVE_PSP_FW
 #include "psp_fw.h"
@@ -3630,6 +3632,11 @@ bool RedNaviProbe::start(IOService *provider) {
     }
     IOLog("RedNavi: registers mapped, %llu KB\n", (uint64_t)regs->getLength() >> 10);
     rn_device_init(&gpu, "RedNavi", reinterpret_cast<volatile void *>(regs->getVirtualAddress()), regs->getLength());
+    // Preserve the shipped RX 7800 XT M4 path and its Linux gfxhub_v3_0_3
+    // default. The 7600 flavor is set only after verified IP Discovery.
+    if (pci->configRead16(kIOPCIConfigVendorID) == 0x1002 &&
+        pci->configRead16(kIOPCIConfigDeviceID) == 0x747e)
+        gpu.gfxhub_variant = RN_GFXHUB_NAVI32_V3_0_3;
 
     // Navi 33 has distinct PSP/SMU, GC 11.0.2, SDMA 6.0.2 and DCN 3.2.1.
     // Detect and verify its actual IP Discovery image before any Navi 32 GPU
@@ -3649,6 +3656,15 @@ bool RedNaviProbe::start(IOService *provider) {
         setProperty("navi33-binary-header-major", static_cast<uint64_t>(check.binaryMajor), 32);
         setProperty("navi33-ip-table-version", static_cast<uint64_t>(check.tableVersion), 32);
         if (check.eligibleForComputeBringup()) {
+            // Explicitly select the gfx1102 M4 flavor without using the
+            // Navi32 firmware, GART, MES or queue start path.
+            const auto m4Profile = rn_navi33::m4::forNavi33(check);
+            if (m4Profile.valid()) {
+                gpu.gfxhub_variant = RN_GFXHUB_NAVI33_V3_0;
+                setProperty("navi33-m4-selected-gfxhub", static_cast<uint64_t>(m4Profile.gfxhub), 32);
+                setProperty("navi33-m4-selected-mmhub", static_cast<uint64_t>(m4Profile.mmhub), 32);
+                setProperty("navi33-m4-gpu-writes-enabled", false);
+            }
             IOLog("RedNavi: Navi33 GC11.0.2 / SDMA6.0.2 / PSP13.0.7 / SMU13.0.7 / DCN3.2.1 / MMHUB3.0.2 verified from device IP Discovery\n");
             setProperty("navi33-identity-verified", true);
             // Populate genuine gfx1102 segment bases before any future SOC15
@@ -3687,6 +3703,9 @@ bool RedNaviProbe::start(IOService *provider) {
                     readBar(ips.mmhub.dwords[0], 0x8ed, &fbTop) &&
                     readBar(ips.mmhub.dwords[0], 0x8d7, &fbOffset);
                 bool p6MemoryVerified = false;
+                uint32_t gfxFbOffsetRaw = 0;
+                const bool gfxFbOffsetRead = readBar(
+                    ips.gc.dwords[0], regGCMC_VM_FB_OFFSET, &gfxFbOffsetRaw);
                 if (mmhubRead) {
                     const auto memory = rn_navi33::makeMemoryWindow(
                         fbBase, fbTop, fbOffset, vramMbytes, bar0Bytes);
@@ -3701,8 +3720,33 @@ bool RedNaviProbe::start(IOService *provider) {
                         vramMbytes, static_cast<uint32_t>(bar0Bytes >> 20),
                         static_cast<uint32_t>(memory.error)};
                     rnPublish(this, "navi33-memory-preflight", mn, mv, 10);
-                    p6MemoryVerified = memory.valid();
+                    // Linux gmc_v11_0_vram_gtt_location derives the
+                    // GPU-physical PTE base from FB_OFFSET, not from the
+                    // FB_LOCATION_BASE MC address. Read both hubs and reject
+                    // mismatches instead of silently treating them as equal.
+                    const auto geometry = rn_navi33::address::makeGeometry(
+                        memory, gfxFbOffsetRaw, gfxFbOffsetRead);
+                    p6MemoryVerified = memory.valid() && geometry.ok();
                     setProperty("navi33-memory-window-verified", memory.valid());
+                    setProperty("navi33-address-geometry-verified", geometry.ok());
+                    const char *const an[] = {
+                        "error", "gfx_fb_offset_raw", "mmhub_fb_offset_raw",
+                        "gfx_read_ok", "mc_start_lo", "mc_start_hi",
+                        "pte_phys_lo", "pte_phys_hi", "usable_mib", "cpu_visible_mib"
+                    };
+                    const uint64_t mc = geometry.ok() ? geometry.geometry.mcStart.value : 0ull;
+                    const uint64_t physical = geometry.ok() ? geometry.geometry.pteBase.value : 0ull;
+                    const uint32_t av[] = {
+                        static_cast<uint32_t>(geometry.error), gfxFbOffsetRaw,
+                        fbOffset, static_cast<uint32_t>(gfxFbOffsetRead),
+                        static_cast<uint32_t>(mc), static_cast<uint32_t>(mc >> 32),
+                        static_cast<uint32_t>(physical), static_cast<uint32_t>(physical >> 32),
+                        static_cast<uint32_t>(memory.fbBytes >> 20),
+                        static_cast<uint32_t>(memory.cpuVisibleBytes >> 20)
+                    };
+                    rnPublish(this, "navi33-address-space-audit", an, av, 10);
+                    // Neither address represents a CPU virtual pointer,
+                    // DMA IOVA, or arbitrary GPU VMID virtual address.
                     if (memory.valid()) {
                         setProperty("navi33-fb-start", memory.fbStart, 64);
                         setProperty("navi33-fb-end", memory.fbEnd, 64);
