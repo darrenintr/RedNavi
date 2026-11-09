@@ -132,6 +132,26 @@ $(ACCEL2KEXT): $(OUT)/accel2_kern_accel2.o $(OUT)/accel2_kern_info.o RedNaviAcce
 	$(call SIGN,$(ACCEL2KEXT))
 	@echo "built $(ACCEL2KEXT)"
 
+# Separate diagnostic-only Navi33 metadata observer. Deliberately NOT
+# part of 'all' or normal EFI Kext artifacts: never installed or loaded by CI.
+DIAGKEXT := $(OUT)/RedNaviNavi33Diag.kext
+$(OUT)/navi33_diag.o: RedNaviDiag/kern_diag.cpp
+	@mkdir -p $(OUT)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OUT)/navi33_diag_info.o: RedNaviDiag/kern_info.c
+	@mkdir -p $(OUT)
+	clang $(ARCH) $(OPT) -mkernel -nostdinc -isystem $(SDK)/Headers -DKERNEL -mmacosx-version-min=12.0 -c $< -o $@
+
+$(DIAGKEXT): $(OUT)/navi33_diag.o $(OUT)/navi33_diag_info.o RedNaviDiag/Info.plist.in
+	@mkdir -p $(DIAGKEXT)/Contents/MacOS
+	$(CXX) $(LDFLAGS) $(OUT)/navi33_diag.o $(OUT)/navi33_diag_info.o -o $(DIAGKEXT)/Contents/MacOS/RedNaviNavi33Diag
+	cp RedNaviDiag/Info.plist.in $(DIAGKEXT)/Contents/Info.plist
+	$(call SIGN,$(DIAGKEXT))
+	@echo "built $(DIAGKEXT) (compile only; DO NOT LOAD)"
+
+diag: $(DIAGKEXT)
+
 # The Metal plug-in stub (user space, docs/M6_ACCELERATOR_STUDY.md) and the program that makes Metal load it.
 MTLBUNDLE := $(OUT)/RedNaviMTLDriver.bundle
 $(MTLBUNDLE): RedNaviMTL/plugin.m RedNaviMTL/compute.m RedNaviMTL/metallib.c RedNaviMTL/rn_air.c RedNaviMTL/rn_vk.c RedNaviMTL/rn_vk_selftest.c $(wildcard RedNaviMTL/*.h) RedNaviMTL/Info.plist
@@ -202,4 +222,4 @@ test:
 check-kernel-firmware:
 	$(CXX) $(CXXFLAGS) -DRN_HAVE_GC_FW -DRN_COMPILE_ONLY_FIRMWARE -Itests/compile -fsyntax-only RedNavi/kern_probe.cpp
 
-.PHONY: all clean test mtl check-kernel-firmware
+.PHONY: all clean test mtl diag check-kernel-firmware
