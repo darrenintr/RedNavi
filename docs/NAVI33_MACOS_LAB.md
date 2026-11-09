@@ -237,10 +237,35 @@ codesign --verify build/Debug/RedNaviNavi33P4.kext
 - CI compiles both Debug and Release experimental bundles, but does
   not publish or inject them. The host tests assert compile/boot
   admission and separate matching category.
-- There is **no** claim of successful live P4 readback until a
-  deliberate boot test produces `navi33-discovery-error=0` and
-  readback evidence. No Kext has been installed or injected by this
-  change.
+- GitHub Actions does **not** install or inject P4. On **2026-11-09**
+  the user explicitly booted the P4 USB on native Sequoia; actual
+  `org.rednavi.Navi33P4 (0.0.1)` loaded and `RedNaviProbe` registered.
+  This is a P4 IP Discovery proof, NOT compute or Metal acceleration.
+
+### First native RX7600 P4/P5/P6 evidence (2026-11-09)
+
+The boot argument `rednavi_navi33_unsafe_p4=1` was present. The live
+IORegistry reported `navi33-identity-verified=Yes`,
+`navi33-discovery-error=0`, 6 required IP blocks,
+`navi33-ip-bases-ready=Yes` and `vram_mib=8176`.
+P5 initially read all three MMHUB FB registers as `0xFFFFFFFF`;
+`navi33-memory-preflight.preflight_error=2` (BadLocation) and
+`navi33-linux-boot-preflight.blocker=2` (MissingMemory).
+
+Root cause in the probe source: **wrong version-specific MMHUB register
+offsets**, copied from `mmhub_3_0_0_offset.h` rather than the Navi33
+`mmhub_3_0_2_offset.h` that Linux's `mmhub_v3_0_2.c` uses.
+Correct native RX7600 dword offsets from MMHUB segment 0 are
+`FB_LOCATION_BASE=0x086c`, `TOP=0x086d`, and `FB_OFFSET=0x0857`;
+the incorrect 3.0.0 values were `0x08ec`, `0x08ed`, `0x08d7`.
+The corrected P5 readback **still requires real-device retesting**.
+Do not replace Navi32's separate MMHUB 3.0.0 register table globally.
+
+Raw P6 mailbox reads were `IFWI=0x80000000` (ready bit set),
+`sOS=0`, `SMU response=1`. But P6 gate `status=3` means
+**MemoryUnverified**, and does not establish firmware initialization,
+sOS ownership, GPU VM setup, or PSP-ring command readiness.
+All PSP/GART/MES GPU writes remain disabled.
 
 Do not add the P4 bundle to the known-good OpenCore EFI. Use only a
 separate, recoverable **test EFI**, and keep the clean boot path
@@ -251,8 +276,9 @@ before taking this risk.
 
 ### Next verified hardware checkpoint
 
-Once the user deliberately boots the test variant (not CI), collect
-the P4/P5/P6 IORegistry fields and capture exact readback from
+After rebuilding P4 with corrected MMHUB 3.0.2 offsets, reboot
+the isolated test USB and collect the P4/P5/P6 IORegistry fields
+including exact readback from
 `navi33-memory-preflight`, `navi33-address-space-audit`,
 `navi33-firmware-preflight`, `navi33-linux-boot-preflight`.
 Only after those checks can we wire the existing Navi33 PSP/GART/MES
