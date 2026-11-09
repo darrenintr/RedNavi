@@ -14,6 +14,8 @@ import re
 import subprocess
 import sys
 
+from navi33_pci_resources import describe_navi33_pci
+
 
 def run(*args: str, timeout: int = 45) -> tuple[int, str]:
     try:
@@ -81,6 +83,7 @@ def rx7600_pci() -> dict:
             if integer_id(node.get("class-code")) is not None else None,
             "io_name": str(node.get("IOName", ""))[:90],
             "registry_name": str(node.get("IORegistryEntryName", ""))[:90],
+            "pci_resources": describe_navi33_pci(node),
         })
     return {"status": "found" if matches else "not_found", "matching_devices": matches}
 
@@ -139,7 +142,7 @@ def main():
     _, args = run("nvram", "boot-args", timeout=8)
     boot = args if "boot-args" in args else ""
     report = {
-        "schema": "rednavi.macos.baseline.v1",
+        "schema": "rednavi.macos.baseline.v2",
         "collected_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "note": "Userland-only observation. PCI visibility does not prove GPU compute or Metal.",
         "macos": {
@@ -170,6 +173,8 @@ def main():
         "saved_report": str(target),
         "rx7600": report["rx7600"]["status"],
         "macos": report["macos"]["version"],
+        "pci_resource_gates": [d["pci_resources"]["p4_p5_resource_gate"]
+                               for d in report["rx7600"]["matching_devices"]],
         "metal_display_lines": [line for line in report["display"] if "Metal" in line],
         "warning": "Do not interpret GOP/firmware framebuffer as native GPU acceleration.",
     }, ensure_ascii=False, indent=2))
