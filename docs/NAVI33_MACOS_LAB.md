@@ -88,3 +88,63 @@ See `docs/NAVI33_P4_RUNTIME.md`, `docs/NAVI33_P5_COMPUTE.md` and
 `docs/INIT_RESOURCES.md`.
 
 **Hardware status:** Navi33 native Metal/compute are not yet validated on RX 7600.
+
+
+## Verified macOS 15.8.2 baseline from the user's hardware (2026-11-09)
+
+System: ASUS TUF B450M-PLUS GAMING / Ryzen 5 3600 / RX 7600
+(PCI `1002:7480`). GPU appears as `GFX0`, OS PCI class `0x030000`.
+The firmware framebuffer is `IONDRVFramebuffer` with `IOFBMemorySize =
+8294400` bytes (`1920 * 1080 * 4`). `MTLCopyAllDevices()` returns
+**zero** devices. The working desktop is not proof of Metal/3D acceleration.
+
+The macOS IORegistry `assigned-addresses` array (five 20-byte PCI records)
+and its matching `IODeviceMemory` descriptors yield:
+
+| Region | CPU physical base | Size | Meaning |
+| --- | ---: | ---: | --- |
+| BAR0 | `0x830000000` | 256 MiB | CPU-mapped VRAM aperture |
+| BAR2 | `0x840000000` | 2 MiB | Doorbell aperture |
+| BAR4 | `0xE000` | 256 bytes | PCI I/O port resource |
+| BAR5 | `0xFC900000` | 1 MiB | MMIO register aperture |
+| ROM | `0xFCA00000` | 128 KiB | Expansion ROM resource |
+
+The same physical RX 7600 under Linux had BAR0 **8192 MiB**, BAR2
+**256 MiB**, and BAR5 **1 MiB** (see `NAVI33_REAL_LINUX_20261108.md`).
+These are CPU physical resources, not GPU MC addresses. A smaller macOS
+BAR0 does not reduce the GPU's physical VRAM from 8 GiB. Do not set
+`RN_VRAM_MC_BASE`, a GPU PTE backing, or a GPU VA from any CPU BAR
+physical address. `IOPCIExpressLinkStatus = 0x1084` is recorded as an
+OS-reported field only; the motherboard's effective PCIe link speed should
+not be inferred from it without upstream/root-port confirmation.
+
+### Updated no-GPU-I/O report
+
+```sh
+cd ~/RedNavi
+git pull --ff-only
+python3 tools/navi33_macos_baseline.py navi33-macos-baseline.json
+python3 -m unittest discover -s tests/host -p 'navi33_pci_resources_test.py'
+make test
+```
+
+Inspect `rx7600.matching_devices[0].pci_resources` in the new report.
+`p4_p5_resource_gate = pass` means only the OS PCI address-array structure
+is coherent and minimum BAR sizes are present. It is **not** permission to
+map BAR5 or load the probe; existing P4/P5 code writes MM_INDEX while reading
+discovery and may change PCI memory decode state. No firmware, MES, DCN or
+accelerator is enabled by this report.
+
+The host tests pin the two observed CPU aperture sizes and verify that the
+existing Navi33 `makeMemoryWindow` and typed address conversion logic can
+handle 256 MiB BAR0, 2 MiB doorbell BAR2, and full 8 GiB Linux ReBAR
+without treating a CPU-visible window as total VRAM. The live MMHUB
+FB_LOCATION and FB_OFFSET values are *not yet captured on macOS*.
+
+### Next hardware gate
+
+Before touching MM_INDEX, prepare a genuine out-of-band recovery path and a
+known-good USB EFI without RedNavi. The RX 7600 is currently the only
+functional display; a soft SSH session alone does not protect against a GPU
+reset, a wedged PCIe bus, or system panic. Isolate an intentionally bounded,
+non-resetting probe and audit every read/write in it before any test run.
