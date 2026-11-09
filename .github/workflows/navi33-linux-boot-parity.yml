@@ -1,0 +1,40 @@
+name: Navi33 Linux boot parity (host only)
+on:
+  push:
+    branches: ['feature/navi33-linux-boot-parity']
+    paths:
+      - 'RedNavi/navi33_linux_boot_parity.h'
+      - 'tests/host/navi33_linux_boot_parity_test.cpp'
+      - 'docs/NAVI33_LINUX_BOOT_PARITY.md'
+      - '.github/workflows/navi33-linux-boot-parity.yml'
+  pull_request:
+    paths:
+      - 'RedNavi/navi33_linux_boot_parity.h'
+      - 'tests/host/navi33_linux_boot_parity_test.cpp'
+      - 'docs/NAVI33_LINUX_BOOT_PARITY.md'
+      - 'RedNavi/kern_probe.cpp'
+      - 'Makefile'
+      - '.github/workflows/navi33-linux-boot-parity.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-order-test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: ['g++', 'clang++']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and run Linux GC11 boot order contract
+        run: |
+          mkdir -p build
+          CXX=${{ matrix.cxx }}
+          $CXX -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic \
+            -fsanitize=address,undefined -fno-omit-frame-pointer -IRedNavi \
+            tests/host/navi33_linux_boot_parity_test.cpp \
+            -o build/navi33_linux_boot_parity_test
+          ./build/navi33_linux_boot_parity_test
