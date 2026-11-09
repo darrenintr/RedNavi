@@ -155,6 +155,8 @@ clean:
 # Use HOST_CXX=g++ where Clang is unavailable; native kext builds still use CXX.
 test:
 	@mkdir -p build
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_probe_admission_test.cpp -o build/navi33_probe_admission_test
+	./build/navi33_probe_admission_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_address_spaces_test.cpp -o build/navi33_address_spaces_test
 	./build/navi33_address_spaces_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_m4_asic_test.cpp -o build/navi33_m4_asic_test
