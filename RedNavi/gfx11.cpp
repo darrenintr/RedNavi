@@ -262,7 +262,12 @@ void rn_gfxhub_enable(struct rn_device *adev, const struct rn_gmc *gmc) {
     tmp = REG_SET_FIELD(tmp, GCVM_L2_CNTL2, INVALIDATE_ALL_L1_TLBS, 1);
     tmp = REG_SET_FIELD(tmp, GCVM_L2_CNTL2, INVALIDATE_L2_CACHE, 1);
     WREG32_SOC15(RN_GC, 0, regGCVM_L2_CNTL2, tmp);
-    tmp = 0x80100007u;                                                       // gfxhub_v3_0_3.c redefines the default (gc_11_0_0 has 0x80120007)
+    // Linux gmc_v11_0_set_gfxhub_funcs: GC11.0.2 -> gfxhub_v3_0;
+    // GC11.0.3 -> gfxhub_v3_0_3. The v3_0 default differs in L2_CNTL3.
+    // Existing Navi32 behaviour remains 0x80100007. This alone does NOT
+    // make the rest of M4 (MMHUB, firmware, MES) safe on Navi33.
+    tmp = adev->gfxhub_variant == RN_GFXHUB_NAVI33_V3_0 ?
+        regGCVM_L2_CNTL3_DEFAULT : 0x80100007u;
     tmp = REG_SET_FIELD(tmp, GCVM_L2_CNTL3, BANK_SELECT, 9);
     tmp = REG_SET_FIELD(tmp, GCVM_L2_CNTL3, L2_CACHE_BIGK_FRAGMENT_SIZE, 6);
     WREG32_SOC15(RN_GC, 0, regGCVM_L2_CNTL3, tmp);
