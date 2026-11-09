@@ -129,10 +129,11 @@ inline MesPreflight inspectMesQueues(const Profile& p,
         q.kiqRing,q.kiqMqd,q.kiqRptr,q.kiqWptr,q.schedRing,q.schedMqd,
         q.schedRptr,q.schedWptr,q.schedulerStatus,q.gfxRing,q.gfxMqd,q.gfxFence
     };
-    // Minimum reserved regions. The real BO owner must provide the full
-    // verified, non-aliasing extents before a hardware writer can be enabled.
+    // Reserve the full RX7800XT M4 ring footprints (64/32/32 KiB), plus
+    // MQDs and pointer/fence regions. The future BO owner must prove
+    // the complete allocations stay pinned for the GPU's lifetime.
     const uint64_t lengths[] = {
-        0x1000,0x1000,8,8,0x1000,0x1000,8,8,8,0x1000,0x1000,8
+        0x10000,0x1000,8,8,0x8000,0x1000,8,8,8,0x8000,0x1000,8
     };
     const uint64_t align[] = {
         256,4096,8,8,256,4096,8,8,8,256,4096,8
