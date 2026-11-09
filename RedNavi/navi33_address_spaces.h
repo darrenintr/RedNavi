@@ -185,6 +185,34 @@ inline Result<DmaIovaTag> hostDmaAddress(const DmaSegment& s,
     return {Error::Ok, DmaIova(s.bus.value + offset)};
 }
 
+// GART-mapped HOST memory is a GPU VA only if its DMA IOVA has a
+// programmed, owned GART PTE mapping. No identity mapping is assumed.
+struct HostVmMapping {
+    uint32_t vmid = 0;
+    GpuVa vaStart{};
+    DmaIova dmaBacking{};
+    uint64_t bytes = 0;
+    bool externallyOwned = false;
+    bool gartPtesLive = false;
+    bool tlbInvalidationAck = false;
+};
+inline Result<GpuVaTag> hostToGpuVa(const DmaSegment& dma, uint64_t offset,
+                                    uint64_t bytes, uint32_t vmid,
+                                    const HostVmMapping& vm) {
+    if (!dma.memoryWired || !dma.dmaMappingConfirmed ||
+        !dma.ownerRetainsMapping) return {Error::NoDmaMapping, {}};
+    if (!vm.externallyOwned || !vm.gartPtesLive || !vm.tlbInvalidationAck)
+        return {Error::UnmappedGpuVa, {}};
+    if (vm.vmid != vmid) return {Error::WrongVmid, {}};
+    if (dma.bus.value != vm.dmaBacking.value ||
+        !validSpan(vm.dmaBacking.value, vm.bytes, kAddressMax48) ||
+        !validSpan(offset, bytes, dma.bytes) ||
+        !validSpan(offset, bytes, vm.bytes) ||
+        !validSpan(vm.vaStart.value, vm.bytes, kAddressMax48))
+        return {Error::OutsideVram, {}};
+    return {Error::Ok, GpuVa(vm.vaStart.value + offset)};
+}
+
 // MMIO and BAR2 doorbells are BYTE offsets in a CPU BAR mapping. IP
 // Discovery and register definitions instead identify DWORD offsets.
 inline Result<BarByteTag> gcRegisterBarOffset(uint32_t segmentBaseDword,
