@@ -105,6 +105,7 @@
 #include "navi33_linux_boot_parity.h"
 #include "navi33_address_spaces.h"
 #include "navi33_m4_asic.h"
+#include "navi33_probe_admission.h"
 
 #ifdef RN_HAVE_PSP_FW
 #include "psp_fw.h"
@@ -3653,6 +3654,34 @@ bool RedNaviProbe::start(IOService *provider) {
     if (!IOService::start(provider)) return false;
     pci = OSDynamicCast(IOPCIDevice, provider);
     if (!pci) return false;
+
+    // The RX 7600 is currently the native macOS boot/display device.
+    // Its P4 "read" sequence modifies MM_INDEX and setMemoryEnable changes
+    // PCI command state. Neither is a harmless IORegistry-only diagnostic.
+    // Fail closed before allocations, PCI config writes or BAR mappings.
+    // This is not a runtime safety certification even in an opt-in build.
+    const uint16_t vendorId = pci->configRead16(kIOPCIConfigVendorID);
+    const uint16_t deviceId = pci->configRead16(kIOPCIConfigDeviceID);
+    if (vendorId == 0x1002u && deviceId == 0x7480u) {
+#if defined(RN_ENABLE_NAVI33_UNSAFE_P4)
+        constexpr bool kExperimentalP4Built = true;
+#else
+        constexpr bool kExperimentalP4Built = false;
+#endif
+        uint32_t explicitOptIn = 0;
+        PE_parse_boot_argn("rednavi_navi33_unsafe_p4", &explicitOptIn,
+                           sizeof(explicitOptIn));
+        const auto admission = rn_navi33::admitEarlyHardwareProbe(
+            vendorId, deviceId, kExperimentalP4Built, explicitOptIn);
+        if (admission != rn_navi33::ProbeAdmission::ExperimentalOnly) {
+            IOLog("RedNavi: RX7600 hardware P4 refused (reason %u); "
+                  "no BAR mapping, PCI memory-enable or MM_INDEX access\\n",
+                  static_cast<unsigned>(admission));
+            return false;
+        }
+        IOLog("RedNavi: WARNING unsafe Navi33 P4 explicitly enabled; "
+              "this may hang the sole GPU/display\\n");
+    }
 
     modeLock = IOLockAlloc();
     boLock = IOLockAlloc();
