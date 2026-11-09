@@ -92,6 +92,14 @@ int main() {
     assert(window.fbStart == 0x8000000000ull);
     assert(window.fbBytes == 8ull * 1024 * 1024 * 1024);
     assert(window.cpuVisibleBytes == 256ull * 1024 * 1024);
+    // Actual macOS Sequoia 15.8.2: 256 MiB BAR0, even though the RX7600
+    // still has 8192 MiB physical VRAM and Linux saw 8176 MiB usable FB.
+    const auto observedMac = makeMemoryWindow(0x8000, 0x81fe, 0, 8192,
+                                               256ull << 20);
+    assert(observedMac.valid());
+    assert(observedMac.fbBytes == 8176ull << 20);
+    assert(observedMac.cpuVisibleBytes == 256ull << 20);
+    assert(observedMac.fbStart == 0x8000000000ull);
     // Physical RX7600: 8192 MiB BAR0, 8176 MiB usable FB, 16 MiB reserved.
     const auto captured = makeMemoryWindow(0x8000, 0x81fe, 0, 8192,
                                            8192ull * 1024 * 1024);
