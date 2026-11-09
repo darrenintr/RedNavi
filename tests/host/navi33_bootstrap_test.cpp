@@ -80,13 +80,34 @@ int main() {
         assert(!hasComputeRegisterBases(missingOptional));
     }
 
+    // Physical RX7600 P4 (2026-11-09): MMHUB 3.0.0 offsets returned
+    // 0xFFFFFFFF on MMHUB 3.0.2. Protect the Navi33-specific offsets.
+    static_assert(mmhub_v3_0_2::kFbLocationBaseDword == 0x086cu,
+                  "Navi33 MMHUB v3.0.2 FB_LOCATION_BASE offset changed");
+    static_assert(mmhub_v3_0_2::kFbLocationTopDword == 0x086du,
+                  "Navi33 MMHUB v3.0.2 FB_LOCATION_TOP offset changed");
+    static_assert(mmhub_v3_0_2::kFbOffsetDword == 0x0857u,
+                  "Navi33 MMHUB v3.0.2 FB_OFFSET offset changed");
+    constexpr uint32_t kNavi33Mmhub0 = 0x1a000u; // real IP Discovery base
     uint32_t off = 0;
+    assert(checkedBarDword(kNavi33Mmhub0, mmhub_v3_0_2::kFbLocationBaseDword,
+                           1u << 20, &off));
+    assert(off == 0x6a1b0u); // CPU BAR5 byte offset, not GPU MC address
+    assert(checkedBarDword(kNavi33Mmhub0, mmhub_v3_0_2::kFbLocationTopDword,
+                           1u << 20, &off));
+    assert(off == 0x6a1b4u);
+    assert(checkedBarDword(kNavi33Mmhub0, mmhub_v3_0_2::kFbOffsetDword,
+                           1u << 20, &off));
+    assert(off == 0x6a15cu);
     assert(checkedBarDword(0x100u, 0x8ecu, 0x4000, &off));
     assert(off == (0x100u + 0x8ecu) * 4u);
     assert(!checkedBarDword(0x100u, 0x8ecu, 0x2000, &off));
     assert(!checkedBarDword(UINT32_MAX, 0, 0x100000u, &off));
     assert(!checkedBarDword(0, 0, 4096, nullptr));
 
+    assert(makeMemoryWindow(0xffffffffu, 0xffffffffu, 0xffffffffu,
+                            8176, 256ull << 20).error ==
+           MemoryError::BadLocation);
     const auto window = makeMemoryWindow(0x8000, 0x81ff, 0, 8192, 0x10000000ull);
     assert(window.valid());
     assert(window.fbStart == 0x8000000000ull);
