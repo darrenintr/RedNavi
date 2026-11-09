@@ -36,10 +36,19 @@ enum rn_hw_ip {
 #define RN_RSMU_INDEX 0x50
 #define RN_RSMU_DATA 0x54
 
+// M4 GFXHUB backend selection. Default 0 retains the validated Navi32
+// legacy setup. An unknown device never implicitly selects the Navi33 path.
+enum rn_gc11_gfxhub_variant {
+    RN_GFXHUB_UNSPECIFIED = 0,
+    RN_GFXHUB_NAVI32_V3_0_3 = 1,
+    RN_GFXHUB_NAVI33_V3_0 = 2,
+};
+
 struct rn_device {
     struct device dev;
     volatile u8 *rmmio;             // mapped register BAR
     size_t rmmio_size;
+    enum rn_gc11_gfxhub_variant gfxhub_variant; // set after IP identity validation
     u32 reg_offset[RN_HWIP_MAX][RN_MAX_INST][RN_MAX_SEG];   // dword base of each IP segment (IP discovery)
     spinlock_t mmio_idx_lock;
 };
