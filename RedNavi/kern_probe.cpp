@@ -4287,6 +4287,9 @@ void RedNaviProbe::stop(IOService *provider) {
     if (doorbellKeep) { rn_set_doorbell(nullptr, 0); doorbellKeep->release(); doorbellKeep = nullptr; }
     if (!retainDma && hostDma) { hostDma->complete(); hostDma->clearMemoryDescriptor(); hostDma->release(); hostDma = nullptr; }
     if (!retainDma && hostBuf) { hostBuf->release(); hostBuf = nullptr; }
+    // P6.4 never exposes fw_pri to the GPU, so its DMA mapping is always safe
+    // to tear down with the service regardless of the legacy gpuLive state.
+    releaseNavi33FwPriDma();
     if (regs) { regs->release(); regs = nullptr; }
     IOService::stop(provider);
 }
