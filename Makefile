@@ -243,6 +243,8 @@ test:
 	./build/navi33_p7_runtime_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p7_postpsp_test.cpp -o build/navi33_p7_postpsp_test
 	./build/navi33_p7_postpsp_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p7_tmr_plan_test.cpp -o build/navi33_p7_tmr_plan_test
+	./build/navi33_p7_tmr_plan_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_linux_boot_parity_test.cpp -o build/navi33_linux_boot_parity_test
 	./build/navi33_linux_boot_parity_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/dma_pages_test.cpp -o build/dma_pages_test
