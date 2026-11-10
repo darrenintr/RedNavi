@@ -323,6 +323,7 @@ class RedNaviProbe : public IOService {
     // Last P7 GPCOM submission telemetry.
     uint32_t p7SubmitWptrBefore {0};
     uint32_t p7SubmitWptrAfter {0};
+    uint32_t p7SubmitFenceBefore {0};
     uint32_t p7SubmitFenceExpected {0};
     uint32_t p7SubmitFenceObserved {0};
     uint32_t p7SubmitPolls {0};
