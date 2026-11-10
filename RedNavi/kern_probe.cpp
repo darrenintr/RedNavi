@@ -105,6 +105,7 @@
 #include "navi33_p7_runtime.h"
 #include "navi33_p7_postpsp.h"
 #include "navi33_p7_tmr_plan.h"
+#include "navi33_p7_pmfw.h"
 #include "navi33_p6_psp_boot_plan.h"
 #include "navi33_p6_psp_staging.h"
 #include "navi33_gart_owner.h"
@@ -5038,6 +5039,127 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-p7-tmr-plan",
                           p72n, p72v, sizeof(p72v) / sizeof(p72v[0]));
 
+                // P7.3 Step 5: PMFW-only PSP checkpoint.  Linux loads
+                // PMFW before SETUP_TMR on MP0 13.0.7 because centralized
+                // C-state management is enabled.  Reuse the already-verified
+                // fw_pri GART VA as the temporary firmware source; the PSP
+                // KM/GPCOM ring copies it into its managed destination.
+                bool p73PmfwPresent = false;
+                bool p73PmfwMetadataVerified = false;
+                bool p73PmfwDigestTrusted = false;
+                uint32_t p73PmfwVersion = 0;
+                uint32_t p73PmfwBytes = 0;
+#if defined(RN_HAVE_SMU_FW)
+                p73PmfwPresent = true;
+#if defined(RN_SMU_FW_METADATA_V1)
+                p73PmfwMetadataVerified = true;
+                p73PmfwDigestTrusted =
+                    RN_SMU_FW_DIGEST_TRUSTED == 1;
+                p73PmfwVersion = kRNSmuFwVersion;
+                p73PmfwBytes = kRNSmuFwSize;
+#endif
+#endif
+
+                rn_navi33::p7_pmfw::Input p73Input{};
+                p73Input.requested = p7StepArg >= 5u;
+                p73Input.pspReady =
+                    p7PspOk && p71RingCreated && p71RuntimeMapped;
+                p73Input.tocAccepted = p71TocAccepted;
+                p73Input.tmrOwnershipVerified =
+                    p72Tmr.ownershipVerified;
+                p73Input.firmwarePresent = p73PmfwPresent;
+                p73Input.metadataVerified =
+                    p73PmfwMetadataVerified;
+                p73Input.digestTrusted = p73PmfwDigestTrusted;
+                p73Input.firmwareBytes = p73PmfwBytes;
+                p73Input.stageBytes = navi33FwPriBytes;
+                const auto p73Gate =
+                    rn_navi33::p7_pmfw::inspect(p73Input);
+
+                bool p73FenceOk = false;
+                bool p73PmfwAccepted = false;
+                uint32_t p73Status = 0xffffffffu;
+                uint32_t p73FwAddrLo = 0;
+                uint32_t p73FwAddrHi = 0;
+                uint32_t p73SmuRespBefore = smuResp;
+                uint32_t p73SmuRespAfter = smuResp;
+
+#if defined(RN_HAVE_SMU_FW)
+                if (p73Gate.mayLoadPmfw &&
+                    navi33FwPriBuf &&
+                    navi33FwPriBuf->getBytesNoCopy()) {
+                    uint8_t *const fwPri = static_cast<uint8_t *>(
+                        navi33FwPriBuf->getBytesNoCopy());
+                    memset(fwPri, 0, navi33FwPriBytes);
+                    memcpy(fwPri, kRNSmuFw, kRNSmuFwSize);
+                    OSSynchronizeIO();
+
+                    const uint32_t pmfwArgs[4] = {
+                        static_cast<uint32_t>(
+                            gartPlan.fwPriGpuAddress),
+                        static_cast<uint32_t>(
+                            gartPlan.fwPriGpuAddress >> 32),
+                        static_cast<uint32_t>(kRNSmuFwSize),
+                        kRNPspFwTypeSmu
+                    };
+                    uint32_t pmfwResp[4] = {};
+                    p73FenceOk = pspSubmitP7(
+                        p71RingGpuVa, p71CmdGpuVa, p71FenceGpuVa,
+                        kRNPspCmdLoadIpFw, pmfwArgs, 4,
+                        pmfwResp, 4);
+                    p73Status = pmfwResp[0];
+                    p73FwAddrLo = pmfwResp[2];
+                    p73FwAddrHi = pmfwResp[3];
+                    p73PmfwAccepted =
+                        p73FenceOk && p73Status == 0;
+
+                    // Read-only observation.  Do not send any SMU mailbox
+                    // message at Step 5.
+                    uint32_t mp1Base = 0;
+                    if (ipBase(kRNHwIdMp1, &mp1Base)) {
+                        p73SmuRespAfter =
+                            rd((mp1Base + 0x29au) * 4);
+                    }
+                }
+#endif
+
+                const char *const p73n[] = {
+                    "step", "error", "requested", "psp_ready",
+                    "toc_accepted", "tmr_ownership_verified",
+                    "firmware_present", "metadata_verified",
+                    "digest_trusted", "firmware_version",
+                    "firmware_bytes", "stage_va_lo", "stage_va_hi",
+                    "fence_ok", "status", "fw_addr_lo", "fw_addr_hi",
+                    "accepted", "smu_response_before",
+                    "smu_response_after", "may_setup_tmr"
+                };
+                const uint32_t p73v[] = {
+                    p7StepArg, static_cast<uint32_t>(p73Gate.error),
+                    static_cast<uint32_t>(p73Input.requested),
+                    static_cast<uint32_t>(p73Input.pspReady),
+                    static_cast<uint32_t>(p73Input.tocAccepted),
+                    static_cast<uint32_t>(
+                        p73Input.tmrOwnershipVerified),
+                    static_cast<uint32_t>(p73PmfwPresent),
+                    static_cast<uint32_t>(
+                        p73PmfwMetadataVerified),
+                    static_cast<uint32_t>(
+                        p73PmfwDigestTrusted),
+                    p73PmfwVersion, p73PmfwBytes,
+                    static_cast<uint32_t>(
+                        gartPlan.fwPriGpuAddress),
+                    static_cast<uint32_t>(
+                        gartPlan.fwPriGpuAddress >> 32),
+                    static_cast<uint32_t>(p73FenceOk),
+                    p73Status, p73FwAddrLo, p73FwAddrHi,
+                    static_cast<uint32_t>(p73PmfwAccepted),
+                    p73SmuRespBefore, p73SmuRespAfter,
+                    0u
+                };
+                rnPublish(this, "navi33-p7-pmfw-runtime",
+                          p73n, p73v,
+                          sizeof(p73v) / sizeof(p73v[0]));
+
                 rn_navi33::p7_postpsp::Input postInput{};
                 postInput.pspAlive = p7SosAfter != 0;
                 postInput.gartReady = p7GartReady;
@@ -5056,8 +5178,7 @@ bool RedNaviProbe::start(IOService *provider) {
                 postInput.tmrMc = p72Tmr.mc;
                 postInput.fbStart = stageGeometry.geometry.mcStart.value;
                 postInput.fbBytes = stageGeometry.geometry.usableVramBytes;
-                // Step 4 intentionally stops before the first PMFW command.
-                postInput.pmfwLoaded = false;
+                postInput.pmfwLoaded = p73PmfwAccepted;
                 const auto postGate =
                     rn_navi33::p7_postpsp::inspect(postInput);
 
