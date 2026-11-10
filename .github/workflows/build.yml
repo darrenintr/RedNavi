@@ -14,6 +14,17 @@ jobs:
       - name: Build
         run: |
           if [ "${{ matrix.config }}" = "Debug" ]; then make DEBUG=1; else make; fi
+      - name: Compile isolated Navi33 PCI metadata observer (do not load)
+        run: |
+          if [ "${{ matrix.config }}" = "Debug" ]; then make DEBUG=1 diag; else make diag; fi
+
+      - name: Compile existing Navi33 P4/P5/P6 in isolated experimental bundle (never load)
+        run: |
+          if [ "${{ matrix.config }}" = "Debug" ]; then make DEBUG=1 navi33-p4; else make navi33-p4; fi
+
+      - name: Compile firmware-enabled native call sites (no firmware linked)
+        run: |
+          if [ "${{ matrix.config }}" = "Debug" ]; then make DEBUG=1 check-kernel-firmware; else make check-kernel-firmware; fi
       - name: Host tests (compat layer)
         if: matrix.config == 'Release'
         run: make test

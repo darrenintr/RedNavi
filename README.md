@@ -8,6 +8,13 @@ Goal: a real framebuffer on the card, driven by our own kext (DCN 3.2 display en
 
 ## Status
 
+**Navi33 development branch:** RX 7600 hardware initialization remains guarded.
+The shared native backend now validates complete DMA mappings before GART
+publication and uses an explicit MES workspace for host/VRAM access; see
+[initialization resources](docs/INIT_RESOURCES.md) and the
+[Linux boot-order contract](docs/NAVI33_LINUX_BOOT_PARITY.md).
+These changes require physical regression testing on the existing Navi32 path.
+
 **Pre-alpha, 2026-11-02.** Display (2026-10-28): the macOS Sequoia desktop is shown on a real RX 7800 XT, over DisplayPort, through our own kext. The kext loads the card's PSP firmware chain and our own DMCUB display firmware, trains the DisplayPort link, lights the pipe in a mode read from the monitor's EDID (tested from 1024x768 to 1920x1080 at 144 Hz) and scans out a linear framebuffer in VRAM that WindowServer draws into; the resolution and refresh rate can be changed from System Settings while it runs. The picture does not come from the firmware's GOP/VESA framebuffer: without the kext the card's output stays dark.
 
 **Acceleration (2026-11-02):** the kext loads the GFX, MES, SDMA, IMU and RLC firmware through the PSP, starts the MES and maps a compute queue and a graphics queue through it, gives each user-space connection its own GPU address space, and manages 16 GB of VRAM. Mesa's RADV runs on top of it on macOS (a patch set and a bridge in [mesa-bridge/](mesa-bridge/), no libdrm): `vulkaninfo` lists the RX 7800 XT, and test programs run compute dispatches (a burst of 20000 submits, ring saturation, 20000 dependent barriers, five processes at once), draw triangles, and render a scene with a depth buffer, a sampled texture and 4x multisampling that is shown on the monitor through the display surface. A hung queue is reset by the kernel (compute and graphics). All of this is test programs run as administrator on a development machine; the numbers and what is not done are in [docs/COMPAT.md](docs/COMPAT.md) and [docs/M5_MESA_BUILD.md](docs/M5_MESA_BUILD.md).

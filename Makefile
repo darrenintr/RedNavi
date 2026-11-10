@@ -20,12 +20,13 @@ FBKEXT := $(OUT)/RedNaviFB.kext
 ACCELKEXT := $(OUT)/RedNaviAccel.kext
 ACCEL2KEXT := $(OUT)/RedNaviAccel2.kext
 CXX := clang++
+HOST_CXX ?= $(CXX)
 ARCH := -arch x86_64
 CXXFLAGS := $(ARCH) $(OPT) -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fno-common -mkernel \
 	-nostdinc -isystem $(SDK)/Headers -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE \
 	-DAPPLE -DNeXT -mmacosx-version-min=12.0 -Wall -Icompat/include
 # Optional local firmware component (python3 tools/gen_psp_fw_header.py ... RedNavi/psp_fw.h).
-ifneq ($(wildcard RedNavi/psp_fw.h RedNavi/dmub_fw.h),)
+ifneq ($(wildcard RedNavi/psp_fw.h),)
 CXXFLAGS += -DRN_HAVE_PSP_FW
 endif
 ifneq ($(wildcard RedNavi/smu_fw.h),)
@@ -131,6 +132,49 @@ $(ACCEL2KEXT): $(OUT)/accel2_kern_accel2.o $(OUT)/accel2_kern_info.o RedNaviAcce
 	$(call SIGN,$(ACCEL2KEXT))
 	@echo "built $(ACCEL2KEXT)"
 
+# Separate diagnostic-only Navi33 metadata observer. Deliberately NOT
+# part of 'all' or normal EFI Kext artifacts: never installed or loaded by CI.
+DIAGKEXT := $(OUT)/RedNaviNavi33Diag.kext
+$(OUT)/navi33_diag.o: RedNaviDiag/kern_diag.cpp
+	@mkdir -p $(OUT)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OUT)/navi33_diag_info.o: RedNaviDiag/kern_info.c
+	@mkdir -p $(OUT)
+	clang $(ARCH) $(OPT) -mkernel -nostdinc -isystem $(SDK)/Headers -DKERNEL -mmacosx-version-min=12.0 -c $< -o $@
+
+$(DIAGKEXT): $(OUT)/navi33_diag.o $(OUT)/navi33_diag_info.o RedNaviDiag/Info.plist.in
+	@mkdir -p $(DIAGKEXT)/Contents/MacOS
+	$(CXX) $(LDFLAGS) $(OUT)/navi33_diag.o $(OUT)/navi33_diag_info.o -o $(DIAGKEXT)/Contents/MacOS/RedNaviNavi33Diag
+	cp RedNaviDiag/Info.plist.in $(DIAGKEXT)/Contents/Info.plist
+	$(call SIGN,$(DIAGKEXT))
+	@echo "built $(DIAGKEXT) (compile only; DO NOT LOAD)"
+
+diag: $(DIAGKEXT)
+
+# EXPERIMENTAL: compile the already-integrated RedNavi P4/P5/P6 code in a
+# separate bundle and non-framebuffer IOKit match category. Not in 'all',
+# not released, not injected by CI. Does NOT enable PSP/MES/Metal.
+# Runtime additionally requires rednavi_navi33_unsafe_p4=1 at boot.
+P4KEXT := $(OUT)/RedNaviNavi33P4.kext
+$(OUT)/navi33_p4_kern_probe.o: RedNavi/kern_probe.cpp $(wildcard RedNavi/*.h compat/include/*/*.h)
+	@mkdir -p $(OUT)
+	$(CXX) $(CXXFLAGS) -DRN_ENABLE_NAVI33_UNSAFE_P4 -c $< -o $@
+
+$(OUT)/navi33_p4_kern_info.o: RedNaviP4/kern_info.c
+	@mkdir -p $(OUT)
+	clang $(ARCH) $(OPT) -mkernel -nostdinc -isystem $(SDK)/Headers -DKERNEL -mmacosx-version-min=12.0 -c $< -o $@
+
+$(P4KEXT): $(OUT)/navi33_p4_kern_probe.o $(OUT)/smu13.o $(OUT)/gfx11.o $(OUT)/edid.o $(OUT)/mode_regs.o $(COMPAT_OBJ) $(OUT)/navi33_p4_kern_info.o RedNaviP4/Info.plist.in
+	@mkdir -p $(P4KEXT)/Contents/MacOS
+	$(CXX) $(LDFLAGS) $(OUT)/navi33_p4_kern_probe.o $(OUT)/smu13.o $(OUT)/gfx11.o $(OUT)/edid.o $(OUT)/mode_regs.o $(COMPAT_OBJ) $(OUT)/navi33_p4_kern_info.o -o $(P4KEXT)/Contents/MacOS/RedNaviNavi33P4
+	@if nm -u $(P4KEXT)/Contents/MacOS/RedNaviNavi33P4 | grep -E "RedNavi|rn_|kRN|^ *_g[A-Z]" | grep -vE "_g(IO|OS)"; then echo "unresolved RedNavi P4 symbols"; exit 1; fi
+	cp RedNaviP4/Info.plist.in $(P4KEXT)/Contents/Info.plist
+	$(call SIGN,$(P4KEXT))
+	@echo "built $(P4KEXT) (P4 EXPERIMENTAL; NOT SAFE TO AUTO-INJECT)"
+
+navi33-p4: $(P4KEXT)
+
 # The Metal plug-in stub (user space, docs/M6_ACCELERATOR_STUDY.md) and the program that makes Metal load it.
 MTLBUNDLE := $(OUT)/RedNaviMTLDriver.bundle
 $(MTLBUNDLE): RedNaviMTL/plugin.m RedNaviMTL/compute.m RedNaviMTL/metallib.c RedNaviMTL/rn_air.c RedNaviMTL/rn_vk.c RedNaviMTL/rn_vk_selftest.c $(wildcard RedNaviMTL/*.h) RedNaviMTL/Info.plist
@@ -150,30 +194,69 @@ mtl: $(MTLBUNDLE) $(OUT)/mtl_probe
 clean:
 	rm -rf build
 
-# Host tests for the pure parts of the compat layer (they run on the Mac, not in the kernel).
+# Host tests for the pure contracts (macOS or Linux, never in the kernel).
+# Use HOST_CXX=g++ where Clang is unavailable; native kext builds still use CXX.
 test:
 	@mkdir -p build
-	clang++ -std=c++17 -Wall -DRN_HOST_TEST -Icompat/include tests/host/compat_test.cpp tests/host/host_hooks.cpp \
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_probe_admission_test.cpp -o build/navi33_probe_admission_test
+	./build/navi33_probe_admission_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_address_spaces_test.cpp -o build/navi33_address_spaces_test
+	./build/navi33_address_spaces_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_m4_asic_test.cpp -o build/navi33_m4_asic_test
+	./build/navi33_m4_asic_test
+	$(HOST_CXX) -std=c++17 -Wall -DRN_HOST_TEST -Icompat/include tests/host/compat_test.cpp tests/host/host_hooks.cpp \
 		compat/src/rn_slab.cpp compat/src/rn_firmware.cpp compat/src/rn_reg.cpp -o build/compat_test
 	./build/compat_test
-	clang++ -std=c++17 -Wall tests/host/edid_test.cpp RedNavi/edid.cpp -o build/edid_test
+	$(HOST_CXX) -std=c++17 -Wall tests/host/edid_test.cpp RedNavi/edid.cpp -o build/edid_test
 	./build/edid_test
-	clang++ -std=c++17 -Wall tests/host/mode_regs_test.cpp RedNavi/mode_regs.cpp RedNavi/edid.cpp -o build/mode_regs_test
+	$(HOST_CXX) -std=c++17 -Wall tests/host/mode_regs_test.cpp RedNavi/mode_regs.cpp RedNavi/edid.cpp -o build/mode_regs_test
 	./build/mode_regs_test
-	clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_facts_test.cpp -o build/navi33_facts_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_facts_test.cpp -o build/navi33_facts_test
 	./build/navi33_facts_test
-	clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p1_test.cpp -o build/navi33_p1_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p1_test.cpp -o build/navi33_p1_test
 	./build/navi33_p1_test
-	clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi -Imesa-bridge/include tests/host/navi33_p2_test.cpp -o build/navi33_p2_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi -Imesa-bridge/include tests/host/navi33_p2_test.cpp -o build/navi33_p2_test
 	./build/navi33_p2_test
-	clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_runtime_test.cpp -o build/navi33_runtime_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_runtime_test.cpp -o build/navi33_runtime_test
 	./build/navi33_runtime_test
-	clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_bootstrap_test.cpp -o build/navi33_bootstrap_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_bootstrap_test.cpp -o build/navi33_bootstrap_test
 	./build/navi33_bootstrap_test
-	clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p6_psp_test.cpp -o build/navi33_p6_psp_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p6_psp_test.cpp -o build/navi33_p6_psp_test
 	./build/navi33_p6_psp_test
-	clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p6_staging_test.cpp -o build/navi33_p6_staging_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p6_psp_boot_plan_test.cpp -o build/navi33_p6_psp_boot_plan_test
+	./build/navi33_p6_psp_boot_plan_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p6_staging_test.cpp -o build/navi33_p6_staging_test
 	./build/navi33_p6_staging_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_gart_owner_test.cpp -o build/navi33_gart_owner_test
+	./build/navi33_gart_owner_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_fw_pri_dma_owner_test.cpp -o build/navi33_fw_pri_dma_owner_test
+	./build/navi33_fw_pri_dma_owner_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_vram_reservation_test.cpp -o build/navi33_vram_reservation_test
+	./build/navi33_vram_reservation_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_vram_ledger_test.cpp -o build/navi33_vram_ledger_test
+	./build/navi33_vram_ledger_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_allocator_carve_test.cpp -o build/navi33_allocator_carve_test
+	./build/navi33_allocator_carve_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_linux_boot_parity_test.cpp -o build/navi33_linux_boot_parity_test
+	./build/navi33_linux_boot_parity_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/dma_pages_test.cpp -o build/dma_pages_test
+	./build/dma_pages_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/mes_workspace_test.cpp -o build/mes_workspace_test
+	./build/mes_workspace_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -DRN_HOST_TEST -Itests/host/stubs -Icompat/include -IRedNavi \
+		tests/host/mes_runtime_reject_test.cpp RedNavi/gfx11.cpp -o build/mes_runtime_reject_test
+	./build/mes_runtime_reject_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -DRN_HOST_TEST -Itests/host/stubs -Icompat/include -IRedNavi \
+		tests/host/mes_runtime_submit_test.cpp -o build/mes_runtime_submit_test
+	./build/mes_runtime_submit_test
+	python3 -m unittest discover -s tests/host -p 'navi33_pci_resources_test.py'
+	python3 -m unittest discover -s tests/host -p 'navi33_diag_isolation_test.py'
 	python3 -m unittest discover -s tests/host -p 'navi33_p6_firmware_audit_test.py'
+	python3 -m unittest discover -s tests/host -p 'navi33_p6_firmware_generator_test.py'
 
-.PHONY: all clean test mtl
+# Exercise optional firmware call sites without embedding or linking any firmware.
+# The declaration-only fixture is visible exclusively to this syntax check.
+check-kernel-firmware:
+	$(CXX) $(CXXFLAGS) -DRN_HAVE_GC_FW -DRN_COMPILE_ONLY_FIRMWARE -Itests/compile -fsyntax-only RedNavi/kern_probe.cpp
+
+.PHONY: all clean test mtl diag navi33-p4 check-kernel-firmware
