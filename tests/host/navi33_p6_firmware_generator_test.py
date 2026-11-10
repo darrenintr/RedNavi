@@ -166,7 +166,7 @@ class PspGeneratorTests(unittest.TestCase):
         data = image(0, [
             (2, 0x11, b"S" * 32),
             (1, 0x22, b"O" * 48),
-            (10, 0x55, b"I" * 16),  # IPKEYMGR_DRV
+            (11, 0x55, b"I" * 16),  # IPKEYMGR_DRV
         ])
         digest = hashlib.sha256(data).hexdigest()
         with tempfile.TemporaryDirectory() as td:
