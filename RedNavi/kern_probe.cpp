@@ -105,6 +105,7 @@
 #include "navi33_p6_psp_boot_plan.h"
 #include "navi33_p6_psp_staging.h"
 #include "navi33_gart_owner.h"
+#include "navi33_fw_pri_dma_owner.h"
 #include "navi33_linux_boot_parity.h"
 #include "navi33_address_spaces.h"
 #include "navi33_m4_asic.h"
@@ -282,6 +283,14 @@ class RedNaviProbe : public IOService {
     IODMACommand *hostDma {nullptr};
     uint64_t hostBus {0};                          // its bus address as the device must use it
     uint32_t hostBusLen {0};
+    // P6.4 ownership-only PSP fw_pri backing. This allocation may obtain IOVA
+    // mappings from IOKit, but is NEVER installed into the GPU GART in P4.
+    IOBufferMemoryDescriptor *navi33FwPriBuf {nullptr};
+    IODMACommand *navi33FwPriDma {nullptr};
+    uint64_t *navi33FwPriPages {nullptr};
+    uint32_t navi33FwPriPageCount {0};
+    uint64_t navi33FwPriBytes {0};
+    bool navi33FwPriPrepared {false};
     // Buffer objects: pages of host memory with an address in the GART window that is never reused (see docs/COMPAT.md on remapping).
     // gpuVa: the buffer's address in the GART window (0 for a buffer that is not mapped there); bus: the bus address of each of its 4 KB pages, from which the user address spaces get their PTEs.
     // A VRAM buffer has no md/dma/bus: vramOff is its offset in VRAM (physically contiguous, 4 KB aligned), dom is RN_BO_VRAM or RN_BO_VRAM_VISIBLE, and a visible one has vmd, the
@@ -468,6 +477,8 @@ private:
     uint32_t pspTmrSize {0};
     uint32_t pspFence {0};
     void dumpRegs(const RNMailboxReg *list, size_t count, const char *property);
+    bool prepareNavi33FwPriDma(bool enabled, uint32_t *mappingError);
+    void releaseNavi33FwPriDma();
 
 public:
     bool start(IOService *provider) override;
