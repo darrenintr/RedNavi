@@ -13,7 +13,7 @@ static p::Evidence good() {
     e.revision = 7;
     e.exactTargetName = true;
     e.sourceDigestPresent = true;
-    e.sourceBytes = 2u << 20;
+    e.sourceBytes = p::kExpectedSourceBytes;
     e.componentMask = p::SysDrv | p::Sos | p::Kdb | p::SocDrv;
     e.maxComponentBytes = 512u << 10;
     return e;
