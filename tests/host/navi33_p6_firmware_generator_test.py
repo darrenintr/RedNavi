@@ -1,4 +1,5 @@
 """Host-only tests for tools/gen_psp_fw_header.py packed PSP parsing."""
+import hashlib
 import importlib.util
 import pathlib
 import struct
@@ -82,6 +83,28 @@ class PspGeneratorTests(unittest.TestCase):
                 (2, 1, b"S" * (GEN.PSP_1_MEG + 1)),
                 (1, 1, b"O" * 16),
             ]))
+
+    def test_external_digest_controls_trust_marker(self):
+        data = image(0, [
+            (2, 0x11, b"S" * 32),
+            (1, 0x22, b"O" * 48),
+        ])
+        digest = hashlib.sha256(data).hexdigest()
+        with tempfile.TemporaryDirectory() as td:
+            src = pathlib.Path(td) / GEN.TARGET_FILE
+            out = pathlib.Path(td) / "psp_fw.h"
+            src.write_bytes(data)
+
+            GEN.main([str(src), str(out)])
+            self.assertIn("#define RN_PSP_FW_DIGEST_TRUSTED 0",
+                          out.read_text())
+
+            GEN.main([str(src), str(out), "--expected-sha256", digest])
+            self.assertIn("#define RN_PSP_FW_DIGEST_TRUSTED 1",
+                          out.read_text())
+
+            with self.assertRaises(SystemExit):
+                GEN.main([str(src), str(out), "--expected-sha256", "0" * 64])
 
     def test_bootloader_commands_match_linux_psp13(self):
         commands = dict(GEN.ORDER)
