@@ -409,24 +409,60 @@ encoded address and the decoded physical address. No reservation state,
 VRAM write permission, GART PTE or hardware programming changes in this
 version.
 
+Native P4 `0.0.8` confirmed the corrected interpretation on the same
+RX7600: raw console `0x830000001`, decoded physical
+`0x830000000`, `physical_encoded=1`, BAR0 offset `0`,
+framebuffer bytes `8294528`, and `candidate_nonoverlap=1`.
+The PTE candidate remains `0x0ff00000..0x0fffffff`, with scratch and
+dummy pages immediately below it. DMA ownership also remained verified.
+
+#### P6.5 software VRAM reservation ledger
+
+P4 `0.0.9` adds a second explicit opt-in:
+`rednavi_navi33_vram_owner_probe=1`.
+When P5 geometry and the decoded boot framebuffer evidence are valid,
+and the normal RedNavi VRAM allocator is still inactive, the Kext may
+claim the candidate ranges in **RedNavi's software bookkeeping only**.
+
+The ledger claim covers exactly:
+- scratch: `0x0fefe000..0x0fefefff`
+- dummy: `0x0feff000..0x0fefffff`
+- VMID0 GART PTE table: `0x0ff00000..0x0fffffff`
+
+The total software reservation is 1056768 bytes. The range lies inside
+the current 256 MiB CPU-visible aperture and outside the active boot
+framebuffer. Because the future visible-VRAM allocator historically
+treats the top part of BAR0 as free, the ledger also records
+`allocator_carve_required=1`; later integration must remove the owned
+range from that allocator before it is activated.
+
+This ownership is intentionally narrow: it is a persistent RedNavi
+runtime claim, not proof that every firmware agent will forever ignore
+the bytes. P4 0.0.9 still performs no VRAM write, PTE install, hub
+programming, TLB invalidation, firmware copy or PSP command.
+
 ### Next verified hardware checkpoint
 
-Build P4 0.0.8 with the same
-`rednavi_navi33_dma_owner_probe=1` opt-in. Collect
-`navi33-boot-framebuffer`, `navi33-vram-reservation-candidate`,
-`navi33-fw-pri-dma-owner` and `navi33-gart-owner-plan`.
+Build P4 0.0.9 with both isolated-test boot args:
+`rednavi_navi33_dma_owner_probe=1` and
+`rednavi_navi33_vram_owner_probe=1`.
 
-Expected on the same machine:
-`console_raw=0x830000001`, decoded
-`console_phys=0x830000000`, `physical_encoded=1`,
-`console_offset=0`, framebuffer bytes 8294528, and
-`candidate_nonoverlap=1`. Ownership and all hardware-write permissions
-must remain zero.
+Expected:
+- `navi33-vram-reservation-ledger.error=0`
+- `ledger_owned=1`
+- `reserved_bytes=1056768`
+- `allocator_carve_required=1`
+- `may_write_vram=0`
+- `may_install_gart_ptes=0`
+- DMA owner remains `owner_verified=1`
+- `navi33-gart-owner-plan.error=0`
+- GART `vram_owner=1`, `dma_owner=1`,
+  `ownership_verified=1`, but `may_program_gart=0`
 
-Only after that corrected native evidence should a later explicit stage
-claim the candidate in RedNavi's own reservation ledger. Actual PTE
-writes, GFXHUB/MMHUB programming and PSP commands remain disabled.
-MES remains later. The historical Cobalt64
+P6 staging should still stop at `NoFirmwareProof`; Linux-parity
+hardware init should remain disabled. Only after this checkpoint should
+the next stage add a read-only/quiescence audit and allocator carve
+before any first PTE/VRAM write. MES remains later. The historical Cobalt64
 compute proof was in a specific RX7600 GPU-passthrough environment;
 its absolute GPU VM/VRAM ownership must be revalidated on bare-metal
 Sequoia.
