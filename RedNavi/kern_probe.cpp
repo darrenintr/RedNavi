@@ -102,6 +102,7 @@
 #include "navi33_runtime.h"
 #include "navi33_bootstrap.h"
 #include "navi33_p6_psp_preflight.h"
+#include "navi33_p7_runtime.h"
 #include "navi33_p6_psp_boot_plan.h"
 #include "navi33_p6_psp_staging.h"
 #include "navi33_gart_owner.h"
@@ -4363,10 +4364,15 @@ bool RedNaviProbe::start(IOService *provider) {
                 rn_navi33::p6_staging::Input stageInput{};
                 stageInput.p6PreflightPassed =
                     gate.status == rn_navi33::p6_psp::Status::NeedsVerifiedFirmware;
-                // A recorded SHA-256 is reproducibility metadata, not
-                // provenance proof. Keep bytes untrusted until RedNavi pins
-                // and compares an independently sourced expected digest.
-                stageInput.firmwareBytesVerified = false;
+                // P7 only trusts the bytes when gen_psp_fw_header.py was
+                // given an independently sourced expected SHA-256 and the
+                // input matched it exactly. Merely embedding its own digest
+                // is not provenance proof.
+                bool firmwareDigestTrusted = false;
+#if defined(RN_HAVE_PSP_FW) && defined(RN_PSP_FW_DIGEST_TRUSTED)
+                firmwareDigestTrusted = RN_PSP_FW_DIGEST_TRUSTED == 1;
+#endif
+                stageInput.firmwareBytesVerified = firmwareDigestTrusted;
                 stageInput.firmwareMetadataVerified = bootFirmware.metadataVerified;
                 stageInput.maxFirmwareComponentBytes =
                     bootEvidence.maxComponentBytes;
@@ -4400,6 +4406,218 @@ bool RedNaviProbe::start(IOService *provider) {
                 };
                 rnPublish(this, "navi33-p6-staging", stn, stv,
                           sizeof(stv) / sizeof(stv[0]));
+
+                // P7: first real Navi33 takeover path. It stays behind the
+                // existing unsafe-P4 build/runtime admission plus a separate
+                // numbered execution step. Step 1 installs only the owned
+                // VMID0/GART mapping; step 2 may additionally hand the
+                // independently verified PSP13.0.7 components to the
+                // bootloader. Step 3 is only a render-pipeline admission
+                // signal here; MES/graphics queues remain a later explicit
+                // hardware checkpoint.
+                uint32_t p7StepArg = 0;
+                PE_parse_boot_argn("rednavi_navi33_p7_step",
+                                   &p7StepArg, sizeof(p7StepArg));
+                if (p7StepArg > 3u) p7StepArg = 0u;
+
+                rn_navi33::p7_runtime::Input p7Input{};
+                p7Input.step = p7StepArg;
+                p7Input.identityVerified = check.eligibleForComputeBringup();
+                p7Input.memoryVerified = p6MemoryVerified && stageGeometry.ok();
+                p7Input.ledgerOwned = navi33VramLedgerOwned;
+                p7Input.carveVerified = carve.carveVerified;
+                p7Input.runtimeQuiescent = carve.quiescent;
+                p7Input.dmaOwnerVerified = dmaOwner.ownerVerified;
+                p7Input.gartOwnerVerified = gartPlan.ownershipVerified;
+                p7Input.firmwareMetadataVerified = bootFirmware.metadataVerified;
+                p7Input.firmwareDigestTrusted = firmwareDigestTrusted;
+                p7Input.secureOsAlive = gate.secureOsAlive;
+                auto p7Gate = rn_navi33::p7_runtime::inspect(p7Input);
+
+                bool p7GartReady = false;
+                bool p7PteVerified = false;
+                int32_t p7FlushRc = -1;
+                uint32_t p7BadPte = 0xffffffffu;
+                struct rn_gmc p7Gmc{};
+
+                if (p7Gate.mayProgramGart) {
+                    p7Gmc.fb_start = stageGeometry.geometry.mcStart.value;
+                    p7Gmc.fb_end = p7Gmc.fb_start +
+                        stageGeometry.geometry.usableVramBytes - 1u;
+                    p7Gmc.gart_start = gartPlan.gartStart;
+                    p7Gmc.gart_end = gartPlan.gartEnd;
+                    p7Gmc.pt_vram_offset = navi33VramPtOffset;
+                    p7Gmc.scratch_vram_offset = navi33VramScratchOffset;
+                    p7Gmc.dummy_vram_offset = navi33VramDummyOffset;
+
+                    // Every PTE outside fw_pri starts invalid. The first 256
+                    // entries map the exact retained IODMACommand page list;
+                    // they are deliberately NOT derived from first_iova.
+                    rn_gart_clear(&gpu, &p7Gmc);
+                    for (uint32_t p = 0; p < navi33FwPriPageCount; ++p)
+                        rn_gart_map_page(&gpu, &p7Gmc, p,
+                                         navi33FwPriPages[p]);
+
+                    p7PteVerified = true;
+                    for (uint32_t p = 0; p < navi33FwPriPageCount; ++p) {
+                        const uint64_t got = rn_gart_read_pte(&gpu, &p7Gmc, p);
+                        const uint64_t expected =
+                            rn_system_pte(navi33FwPriPages[p]);
+                        if (got != expected) {
+                            p7PteVerified = false;
+                            p7BadPte = p;
+                            break;
+                        }
+                    }
+
+                    if (p7PteVerified) {
+                        rn_gfxhub_enable(&gpu, &p7Gmc);
+                        rn_mmhub_enable(&gpu, &p7Gmc);
+                        p7FlushRc = rn_gart_flush(&gpu);
+                        p7GartReady = p7FlushRc == 0;
+                    }
+                }
+
+                const char *const p7gn[] = {
+                    "step", "gate_error", "may_program_gart",
+                    "pte_verified", "bad_pte", "flush_rc", "gart_ready",
+                    "gart_start_lo", "gart_start_hi", "fw_pri_lo",
+                    "fw_pri_hi", "pt_offset"
+                };
+                const uint32_t p7gv[] = {
+                    p7StepArg, static_cast<uint32_t>(p7Gate.error),
+                    static_cast<uint32_t>(p7Gate.mayProgramGart),
+                    static_cast<uint32_t>(p7PteVerified), p7BadPte,
+                    static_cast<uint32_t>(p7FlushRc),
+                    static_cast<uint32_t>(p7GartReady),
+                    static_cast<uint32_t>(gartPlan.gartStart),
+                    static_cast<uint32_t>(gartPlan.gartStart >> 32),
+                    static_cast<uint32_t>(gartPlan.fwPriGpuAddress),
+                    static_cast<uint32_t>(gartPlan.fwPriGpuAddress >> 32),
+                    static_cast<uint32_t>(navi33VramPtOffset)
+                };
+                rnPublish(this, "navi33-p7-gart-runtime", p7gn, p7gv,
+                          sizeof(p7gv) / sizeof(p7gv[0]));
+
+                uint32_t p7ChainDone = 0;
+                uint32_t p7SosAfter = pspSos;
+                bool p7PspOk = false;
+#if defined(RN_HAVE_PSP_FW)
+                if (p7Gate.mayIssuePspBootloader && p7GartReady &&
+                    !gate.secureOsAlive) {
+                    uint32_t mp0Base = 0;
+                    if (ipBase(kRNHwIdMp0, &mp0Base) &&
+                        navi33FwPriBuf && navi33FwPriBuf->getBytesNoCopy()) {
+                        const uint32_t r35 =
+                            (mp0Base + kRNMp0C2pmsg35) * 4;
+                        const uint32_t r36 =
+                            (mp0Base + kRNMp0C2pmsg36) * 4;
+                        const uint32_t r81 =
+                            (mp0Base + kRNMp0C2pmsg81) * 4;
+                        uint8_t *const fwPri = static_cast<uint8_t *>(
+                            navi33FwPriBuf->getBytesNoCopy());
+
+                        bool chainOk = true;
+                        for (const auto &component : kRNPspChain) {
+                            uint32_t ready = 0;
+                            for (uint32_t wait = 0; wait < 2000u; ++wait) {
+                                ready = rd(r35);
+                                if (ready == kRNPspBlReady) break;
+                                IOSleep(1);
+                            }
+                            if (ready != kRNPspBlReady ||
+                                component.size > navi33FwPriBytes) {
+                                chainOk = false;
+                                break;
+                            }
+
+                            memset(fwPri, 0, navi33FwPriBytes);
+                            memcpy(fwPri, component.data, component.size);
+                            // x86 DMA is coherent and the GART PTE is marked
+                            // SYSTEM+SNOOPED. Keep the compiler/CPU ordering
+                            // explicit before ringing the PSP mailbox.
+                            OSSynchronizeIO();
+
+                            const uint32_t before81 = rd(r81);
+                            wr(r36, static_cast<uint32_t>(
+                                gartPlan.fwPriGpuAddress >> 20));
+                            OSSynchronizeIO();
+                            wr(r35, component.cmd);
+
+                            if (component.cmd == kRNPspBlLoadSos) {
+                                IOSleep(20);
+                                for (uint32_t wait = 0; wait < 2000u; ++wait) {
+                                    if (rd(r81) != before81) break;
+                                    IOSleep(1);
+                                }
+                                if (rd(r81) == before81) {
+                                    chainOk = false;
+                                    break;
+                                }
+                            } else {
+                                uint32_t after = 0;
+                                IOSleep(5);
+                                for (uint32_t wait = 0; wait < 2000u; ++wait) {
+                                    after = rd(r35);
+                                    if (after == kRNPspBlReady) break;
+                                    IOSleep(1);
+                                }
+                                if (after != kRNPspBlReady) {
+                                    chainOk = false;
+                                    break;
+                                }
+                            }
+                            ++p7ChainDone;
+                        }
+                        p7SosAfter = rd(r81);
+                        p7PspOk = chainOk && p7SosAfter != 0;
+                    }
+                } else if (gate.secureOsAlive) {
+                    p7PspOk = true;
+                }
+#endif
+
+                const char *const p7pn[] = {
+                    "step", "firmware_metadata_verified",
+                    "firmware_digest_trusted", "gart_ready",
+                    "may_issue_psp_bootloader", "chain_done",
+                    "sos_before", "sos_after", "psp_ok"
+                };
+                const uint32_t p7pv[] = {
+                    p7StepArg,
+                    static_cast<uint32_t>(bootFirmware.metadataVerified),
+                    static_cast<uint32_t>(firmwareDigestTrusted),
+                    static_cast<uint32_t>(p7GartReady),
+                    static_cast<uint32_t>(p7Gate.mayIssuePspBootloader),
+                    p7ChainDone, pspSos, p7SosAfter,
+                    static_cast<uint32_t>(p7PspOk)
+                };
+                rnPublish(this, "navi33-p7-psp-runtime", p7pn, p7pv,
+                          sizeof(p7pv) / sizeof(p7pv[0]));
+
+                // Re-evaluate step 3 after a same-boot PSP transition. This
+                // connects P7 to the render/queue pipeline without starting
+                // MES blindly: the next checkpoint must additionally prove
+                // GC/MES firmware and queue workspace ownership.
+                p7Input.secureOsAlive = p7SosAfter != 0;
+                const auto p7AfterPsp =
+                    rn_navi33::p7_runtime::inspect(p7Input);
+                const char *const p7rn[] = {
+                    "step", "gate_error", "gart_ready", "psp_ready",
+                    "sos_alive", "may_start_queues",
+                    "mes_started", "graphics_queue_started"
+                };
+                const uint32_t p7rv[] = {
+                    p7StepArg, static_cast<uint32_t>(p7AfterPsp.error),
+                    static_cast<uint32_t>(p7GartReady),
+                    static_cast<uint32_t>(p7PspOk),
+                    static_cast<uint32_t>(p7SosAfter != 0),
+                    static_cast<uint32_t>(
+                        p7AfterPsp.mayStartQueues && p7GartReady && p7PspOk),
+                    0u, 0u
+                };
+                rnPublish(this, "navi33-p7-render-pipeline", p7rn, p7rv,
+                          sizeof(p7rv) / sizeof(p7rv[0]));
 
                 // Linux GC11.0.2 boot-parity preflight. This is a read-only
                 // status report; it does not substitute for a real PSP,
