@@ -714,6 +714,7 @@ void RedNaviProbe::releaseNavi33PmfwDma() {
     navi33PmfwPageCount = 0;
     navi33PmfwStageBytes = 0;
     navi33PmfwPrepared = false;
+    navi33PmfwMapped = false;
 }
 
 bool RedNaviProbe::prepareNavi33PmfwDma(
@@ -738,6 +739,8 @@ bool RedNaviProbe::prepareNavi33PmfwDma(
         return false; // never replace backing while live PTEs exist
 
     releaseNavi33PmfwDma();
+    navi33PmfwPageCount = pages;
+    navi33PmfwStageBytes = stageBytes;
 
     navi33PmfwBuf = IOBufferMemoryDescriptor::inTaskWithOptions(
         kernel_task, kIODirectionInOut, stageBytes, 4096);
@@ -794,8 +797,6 @@ bool RedNaviProbe::prepareNavi33PmfwDma(
         return false;
     }
 
-    navi33PmfwPageCount = pages;
-    navi33PmfwStageBytes = stageBytes;
     navi33PmfwPrepared = true;
     return true;
 }
@@ -5229,6 +5230,15 @@ bool RedNaviProbe::start(IOService *provider) {
                 uint32_t p73SmuRespBefore = smuResp;
                 uint32_t p73SmuRespAfter = smuResp;
 
+                // LOAD_TOC used the same submit helper earlier in this boot.
+                // Reset trace fields so PMFW telemetry never reports the TOC
+                // submission when PMFW staging itself fails.
+                p7SubmitWptrBefore = 0;
+                p7SubmitWptrAfter = 0;
+                p7SubmitFenceExpected = 0;
+                p7SubmitFenceObserved = 0;
+                p7SubmitPolls = 0;
+
 #if defined(RN_HAVE_SMU_FW)
                 if (p73Gate.mayLoadPmfw &&
                     prepareNavi33PmfwDma(
@@ -5544,6 +5554,11 @@ void RedNaviProbe::stop(IOService *provider) {
         releaseNavi33PspRuntimeDma();
     } else {
         IOLog("RedNavi: P7.1 PSP runtime GART pages are live; retaining DMA backing until reboot\n");
+    }
+    if (!navi33PmfwMapped) {
+        releaseNavi33PmfwDma();
+    } else {
+        IOLog("RedNavi: P7.3 PMFW staging GART pages are live; retaining DMA backing until reboot\n");
     }
     // P6.4 ownership-only probes can be released normally. P7, however,
     // installs these exact pages into live VMID0/GART PTEs. There is not yet
