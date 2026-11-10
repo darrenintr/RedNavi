@@ -13,6 +13,12 @@
 
 namespace rn_navi33 { namespace p7_runtime {
 
+constexpr uint32_t kMaxExecutionStep = 4u;
+
+constexpr uint32_t sanitizeStep(uint32_t raw) {
+    return raw <= kMaxExecutionStep ? raw : 0u;
+}
+
 enum class Error : uint8_t {
     Ok = 0,
     Disabled,
