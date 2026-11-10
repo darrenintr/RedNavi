@@ -138,6 +138,47 @@ class PspGeneratorTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 GEN.main([str(src), str(out), "--expected-sha256", "0" * 64])
 
+    def test_psp13_spl_command_reuses_kdb_payload_like_linux(self):
+        data = image(0, [
+            (2, 0x11, b"S" * 32),  # SYS_DRV
+            (1, 0x22, b"O" * 48),  # SOS
+            (3, 0x33, b"K" * 24),  # KDB
+            (5, 0x44, b"P" * 12),  # SPL descriptor is only the presence gate
+        ])
+        digest = hashlib.sha256(data).hexdigest()
+        with tempfile.TemporaryDirectory() as td:
+            src = pathlib.Path(td) / GEN.TARGET_FILE
+            out = pathlib.Path(td) / "psp_fw.h"
+            src.write_bytes(data)
+            GEN.main([str(src), str(out), "--expected-sha256", digest])
+            header = out.read_text()
+
+        self.assertIn(
+            '{"SPL", 0x10000000, 0x33, kRnFw_KDB, 24},',
+            header,
+        )
+        self.assertNotIn(
+            '{"SPL", 0x10000000, 0x44, kRnFw_SPL, 12},',
+            header,
+        )
+
+    def test_psp13_skips_ipkeymgr_without_callback(self):
+        data = image(0, [
+            (2, 0x11, b"S" * 32),
+            (1, 0x22, b"O" * 48),
+            (10, 0x55, b"I" * 16),  # IPKEYMGR_DRV
+        ])
+        digest = hashlib.sha256(data).hexdigest()
+        with tempfile.TemporaryDirectory() as td:
+            src = pathlib.Path(td) / GEN.TARGET_FILE
+            out = pathlib.Path(td) / "psp_fw.h"
+            src.write_bytes(data)
+            GEN.main([str(src), str(out), "--expected-sha256", digest])
+            header = out.read_text()
+
+        self.assertIn("kRnFw_IPKEYMGR_DRV", header)
+        self.assertNotIn('{"IPKEYMGR_DRV",', header)
+
     def test_bootloader_commands_match_linux_psp13(self):
         commands = dict(GEN.ORDER)
         self.assertEqual(commands["SYS_DRV"], 0x10000)
