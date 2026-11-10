@@ -91,6 +91,9 @@ extern "C" {
 void rn_gfxhub_enable(struct rn_device *adev, const struct rn_gmc *gmc);
 void rn_mmhub_enable(struct rn_device *adev, const struct rn_gmc *gmc);   // mmhub_v3_0_gart_enable: the same GART window and page table on the second memory hub (Linux does both)
 void rn_mmhub_state(struct rn_device *adev, u32 out[8]);
+void rn_mmhub_prepare_invalidation(struct rn_device *adev);
+int rn_mmhub_gart_flush(struct rn_device *adev);
+void rn_mmhub_flush_stats(u32 out[3]); // failures, last ACK, last semaphore read
 
 // The VMID 0 page table (VRAM, at gmc.pt_vram_offset) maps the GART window gmc.gart_start..gart_end in 4 KB pages. rn_gfxhub_enable
 // zeroes it; rn_gart_map_page then makes page `page` of the window point at a system memory page (bus address as the IOMMU or the
