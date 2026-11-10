@@ -31,6 +31,22 @@ ORDER = [
     ("RAS_DRV", 0xE0000), ("IPKEYMGR_DRV", 0xF0000),
     ("SPDM_DRV", 0x20000000), ("SOS", 0x20000),
 ]
+
+# Linux PSP13 is slightly unusual here:
+#   psp_hw_start() checks that psp->spl is present, but
+#   psp_v13_0_bootloader_load_spl() deliberately copies psp->kdb again before
+#   issuing PSP_BL__LOAD_TOS_SPL_TABLE.  Do not feed the packed SPL descriptor
+#   bytes to that command on Navi33/PSP13.0.7.
+PSP13_PAYLOAD_SOURCE = {
+    "SPL": "KDB",
+}
+
+# psp_v13_0_funcs does not expose bootloader_load_ipkeymgr_drv.  The packed
+# image parser may still encounter that descriptor on other PSP13 images, but
+# psp_hw_start() skips it because the callback is NULL.
+PSP13_UNSUPPORTED_BOOT_STEPS = {
+    "IPKEYMGR_DRV",
+}
 BITS = {
     "SOS": 1 << 0,
     "SYS_DRV": 1 << 1,
@@ -164,22 +180,45 @@ def main(argv=None):
         f.write(f"#define kRNPspHeaderMajor {header_major}u\n")
         f.write(f"#define kRNPspHeaderMinor {header_minor}u\n")
 
-        entries = []
-        for name, cmd in ORDER:
-            if name not in found:
+        # Emit each packed component once.  The executable boot chain below
+        # may intentionally reference a different payload (PSP13 SPL uses KDB).
+        emitted = set()
+        for name, _cmd in ORDER:
+            if name not in found or name in emitted:
                 continue
             ver, data = found[name]
             f.write(f"static const unsigned char kRnFw_{name}[] = {{\n")
             for j in range(0, len(data), 16):
                 f.write("    " + ", ".join(f"0x{x:02x}" for x in data[j:j + 16]) + ",\n")
             f.write("};\n")
-            entries.append((name, cmd, ver, len(data)))
-            print(f"{name}: {len(data)} bytes, version 0x{ver:x}, command 0x{cmd:x}")
+            emitted.add(name)
+
+        entries = []
+        for name, cmd in ORDER:
+            if name not in found or name in PSP13_UNSUPPORTED_BOOT_STEPS:
+                continue
+            payload_name = PSP13_PAYLOAD_SOURCE.get(name, name)
+            if payload_name not in found:
+                raise ValueError(
+                    f"{name} boot step requires {payload_name}, but it is missing"
+                )
+            payload_ver, payload = found[payload_name]
+            entries.append(
+                (name, cmd, payload_ver, payload_name, len(payload))
+            )
+            suffix = "" if payload_name == name else f" using {payload_name} payload"
+            print(
+                f"{name}: {len(payload)} boot bytes, version 0x{payload_ver:x}, "
+                f"command 0x{cmd:x}{suffix}"
+            )
 
         f.write("static const struct { const char *name; unsigned int cmd; unsigned int version; "
                 "const unsigned char *data; unsigned int size; } kRNPspChain[] = {\n")
-        for name, cmd, ver, n in entries:
-            f.write(f'    {{"{name}", 0x{cmd:x}, 0x{ver:x}, kRnFw_{name}, {n}}},\n')
+        for name, cmd, ver, payload_name, n in entries:
+            f.write(
+                f'    {{"{name}", 0x{cmd:x}, 0x{ver:x}, '
+                f'kRnFw_{payload_name}, {n}}},\n'
+            )
         f.write("};\n")
 
         if "TOC" in found:

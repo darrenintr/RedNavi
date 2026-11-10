@@ -4703,9 +4703,32 @@ bool RedNaviProbe::start(IOService *provider) {
                           sizeof(p7gv) / sizeof(p7gv[0]));
 
                 uint32_t p7ChainDone = 0;
+                uint32_t p7ChainTotal = 0;
+                uint32_t p7ChainTarget = 0;
+                uint32_t p7FailedIndex = 0xffffffffu;
+                uint32_t p7FailureReason = 0;
+                uint32_t p7LastIndex = 0xffffffffu;
+                uint32_t p7LastCmd = 0;
+                uint32_t p7LastSize = 0;
+                uint32_t p7LastC35Before = 0;
+                uint32_t p7LastC35After = 0;
+                uint32_t p7LastC36 = 0;
+                uint32_t p7LastC58 = 0;
+                uint32_t p7LastC81 = pspSos;
                 uint32_t p7SosAfter = pspSos;
                 bool p7PspOk = false;
 #if defined(RN_HAVE_PSP_FW)
+                p7ChainTotal = static_cast<uint32_t>(
+                    sizeof(kRNPspChain) / sizeof(kRNPspChain[0]));
+                p7ChainTarget = p7ChainTotal;
+                uint32_t p7LimitArg = 0;
+                if (PE_parse_boot_argn(
+                        "rednavi_navi33_p7_psp_limit",
+                        &p7LimitArg, sizeof(p7LimitArg)) &&
+                    p7LimitArg > 0 && p7LimitArg < p7ChainTarget) {
+                    p7ChainTarget = p7LimitArg;
+                }
+
                 if (p7Gate.mayIssuePspBootloader && p7GartReady &&
                     !gate.secureOsAlive) {
                     uint32_t mp0Base = 0;
@@ -4715,57 +4738,92 @@ bool RedNaviProbe::start(IOService *provider) {
                             (mp0Base + kRNMp0C2pmsg35) * 4;
                         const uint32_t r36 =
                             (mp0Base + kRNMp0C2pmsg36) * 4;
+                        const uint32_t r58 =
+                            (mp0Base + kRNMp0C2pmsg58) * 4;
                         const uint32_t r81 =
                             (mp0Base + kRNMp0C2pmsg81) * 4;
                         uint8_t *const fwPri = static_cast<uint8_t *>(
                             navi33FwPriBuf->getBytesNoCopy());
 
                         bool chainOk = true;
-                        for (const auto &component : kRNPspChain) {
+                        for (uint32_t index = 0;
+                             index < p7ChainTarget; ++index) {
+                            const auto &component = kRNPspChain[index];
+                            p7LastIndex = index;
+                            p7LastCmd = component.cmd;
+                            p7LastSize = component.size;
+
                             uint32_t ready = 0;
                             for (uint32_t wait = 0; wait < 2000u; ++wait) {
                                 ready = rd(r35);
                                 if (ready == kRNPspBlReady) break;
                                 IOSleep(1);
                             }
-                            if (ready != kRNPspBlReady ||
-                                component.size > navi33FwPriBytes) {
+                            p7LastC35Before = ready;
+                            if (ready != kRNPspBlReady) {
+                                p7FailureReason = 1; // bootloader not ready
+                                p7FailedIndex = index;
+                                chainOk = false;
+                                break;
+                            }
+                            if (component.size > navi33FwPriBytes) {
+                                p7FailureReason = 2; // component too large
+                                p7FailedIndex = index;
                                 chainOk = false;
                                 break;
                             }
 
                             memset(fwPri, 0, navi33FwPriBytes);
                             memcpy(fwPri, component.data, component.size);
-                            // x86 DMA is coherent and the GART PTE is marked
-                            // SYSTEM+SNOOPED. Keep the compiler/CPU ordering
-                            // explicit before ringing the PSP mailbox.
+                            // Bare-metal Linux normally allocates fw_pri in
+                            // GTT for PSP13. The P7 GART PTEs are
+                            // SYSTEM+SNOOPED, so x86 cache-coherent host
+                            // memory is intentionally used here as well.
                             OSSynchronizeIO();
 
                             const uint32_t before81 = rd(r81);
                             wr(r36, static_cast<uint32_t>(
                                 gartPlan.fwPriGpuAddress >> 20));
                             OSSynchronizeIO();
+                            p7LastC36 = rd(r36);
                             wr(r35, component.cmd);
 
                             if (component.cmd == kRNPspBlLoadSos) {
+                                // Linux psp_v13_0_bootloader_load_sos waits
+                                // 20 ms before checking for a C2PMSG_81
+                                // transition.
                                 IOSleep(20);
-                                for (uint32_t wait = 0; wait < 2000u; ++wait) {
-                                    if (rd(r81) != before81) break;
+                                uint32_t after81 = before81;
+                                for (uint32_t wait = 0;
+                                     wait < 2000u; ++wait) {
+                                    after81 = rd(r81);
+                                    if (after81 != before81) break;
                                     IOSleep(1);
                                 }
-                                if (rd(r81) == before81) {
+                                p7LastC35After = rd(r35);
+                                p7LastC58 = rd(r58);
+                                p7LastC81 = after81;
+                                if (after81 == before81) {
+                                    p7FailureReason = 4; // sOS sign-of-life did not change
+                                    p7FailedIndex = index;
                                     chainOk = false;
                                     break;
                                 }
                             } else {
                                 uint32_t after = 0;
                                 IOSleep(5);
-                                for (uint32_t wait = 0; wait < 2000u; ++wait) {
+                                for (uint32_t wait = 0;
+                                     wait < 2000u; ++wait) {
                                     after = rd(r35);
                                     if (after == kRNPspBlReady) break;
                                     IOSleep(1);
                                 }
+                                p7LastC35After = after;
+                                p7LastC58 = rd(r58);
+                                p7LastC81 = rd(r81);
                                 if (after != kRNPspBlReady) {
+                                    p7FailureReason = 3; // command completion timeout/error
+                                    p7FailedIndex = index;
                                     chainOk = false;
                                     break;
                                 }
@@ -4773,7 +4831,16 @@ bool RedNaviProbe::start(IOService *provider) {
                             ++p7ChainDone;
                         }
                         p7SosAfter = rd(r81);
-                        p7PspOk = chainOk && p7SosAfter != 0;
+                        p7LastC81 = p7SosAfter;
+                        // A deliberately limited chain is a successful
+                        // checkpoint, not a complete PSP boot. Only advertise
+                        // psp_ok after the full generated chain reaches sOS.
+                        p7PspOk = chainOk &&
+                            p7ChainTarget == p7ChainTotal &&
+                            p7ChainDone == p7ChainTotal &&
+                            p7SosAfter != 0;
+                    } else {
+                        p7FailureReason = 5; // MP0 base or fw_pri CPU buffer missing
                     }
                 } else if (gate.secureOsAlive) {
                     p7PspOk = true;
@@ -4783,7 +4850,13 @@ bool RedNaviProbe::start(IOService *provider) {
                 const char *const p7pn[] = {
                     "step", "firmware_metadata_verified",
                     "firmware_digest_trusted", "gart_ready",
-                    "may_issue_psp_bootloader", "chain_done",
+                    "may_issue_psp_bootloader",
+                    "chain_done", "chain_total", "chain_target",
+                    "chain_limited", "failed_index", "failure_reason",
+                    "last_index", "last_cmd", "last_size",
+                    "last_c2pmsg35_before", "last_c2pmsg35_after",
+                    "last_c2pmsg36", "last_c2pmsg58",
+                    "last_c2pmsg81",
                     "sos_before", "sos_after", "psp_ok"
                 };
                 const uint32_t p7pv[] = {
@@ -4792,7 +4865,15 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(firmwareDigestTrusted),
                     static_cast<uint32_t>(p7GartReady),
                     static_cast<uint32_t>(p7Gate.mayIssuePspBootloader),
-                    p7ChainDone, pspSos, p7SosAfter,
+                    p7ChainDone, p7ChainTotal, p7ChainTarget,
+                    static_cast<uint32_t>(
+                        p7ChainTarget != 0 &&
+                        p7ChainTarget < p7ChainTotal),
+                    p7FailedIndex, p7FailureReason,
+                    p7LastIndex, p7LastCmd, p7LastSize,
+                    p7LastC35Before, p7LastC35After,
+                    p7LastC36, p7LastC58, p7LastC81,
+                    pspSos, p7SosAfter,
                     static_cast<uint32_t>(p7PspOk)
                 };
                 rnPublish(this, "navi33-p7-psp-runtime", p7pn, p7pv,
