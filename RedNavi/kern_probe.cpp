@@ -104,6 +104,7 @@
 #include "navi33_p6_psp_preflight.h"
 #include "navi33_p7_runtime.h"
 #include "navi33_p7_postpsp.h"
+#include "navi33_p7_tmr_plan.h"
 #include "navi33_p6_psp_boot_plan.h"
 #include "navi33_p6_psp_staging.h"
 #include "navi33_gart_owner.h"
@@ -4968,6 +4969,74 @@ bool RedNaviProbe::start(IOService *provider) {
 #endif
                 }
 
+                // P7.2 Step 4 is deliberately software-only.  Use the
+                // P6.6 allocator carve plus the PSP-returned LOAD_TOC size to
+                // claim a naturally aligned TMR inside RedNavi's verified
+                // CPU-visible VRAM tail.  No PMFW, SETUP_TMR, or other PSP
+                // command is issued at this stage.
+                rn_navi33::p7_tmr::Input p72TmrInput{};
+                p72TmrInput.requested = p7StepArg >= 4u;
+                p72TmrInput.tocAccepted = p71TocAccepted;
+                p72TmrInput.allocatorCarveVerified = carve.carveVerified;
+                p72TmrInput.allocatorQuiescent = carve.quiescent;
+                p72TmrInput.tmrBytes = p71TmrBytes;
+                if (stageGeometry.ok()) {
+                    p72TmrInput.cpuVisibleBytes =
+                        stageGeometry.geometry.cpuVisibleBytes;
+                    p72TmrInput.mcStart =
+                        stageGeometry.geometry.mcStart.value;
+                    // Linux amdgpu_gmc_vram_pa() translates VRAM MC to
+                    // GPU-physical VRAM using FB_OFFSET, not PCI BAR0.
+                    p72TmrInput.vramPhysBase =
+                        stageGeometry.geometry.pteBase.value;
+                }
+                p72TmrInput.freeRange = {
+                    carve.left.offset, carve.left.bytes
+                };
+                p72TmrInput.console = {
+                    reservePlan.console.offset, reservePlan.console.bytes
+                };
+                p72TmrInput.priorReservation = {
+                    navi33VramScratchOffset, ledger.reservedBytes
+                };
+                const auto p72Tmr =
+                    rn_navi33::p7_tmr::inspect(p72TmrInput);
+
+                const char *const p72n[] = {
+                    "step", "error", "requested", "toc_accepted",
+                    "carve_verified", "allocator_quiescent", "tmr_bytes",
+                    "offset_lo", "offset_hi", "mc_lo", "mc_hi",
+                    "pa_lo", "pa_hi", "natural_aligned",
+                    "inside_visible_vram", "no_overlap",
+                    "ownership_verified", "may_write_vram",
+                    "may_issue_setup_tmr"
+                };
+                const uint32_t p72v[] = {
+                    p7StepArg, static_cast<uint32_t>(p72Tmr.error),
+                    static_cast<uint32_t>(p72TmrInput.requested),
+                    static_cast<uint32_t>(p72TmrInput.tocAccepted),
+                    static_cast<uint32_t>(
+                        p72TmrInput.allocatorCarveVerified),
+                    static_cast<uint32_t>(
+                        p72TmrInput.allocatorQuiescent),
+                    static_cast<uint32_t>(p72TmrInput.tmrBytes),
+                    static_cast<uint32_t>(p72Tmr.candidate.offset),
+                    static_cast<uint32_t>(
+                        p72Tmr.candidate.offset >> 32),
+                    static_cast<uint32_t>(p72Tmr.mc),
+                    static_cast<uint32_t>(p72Tmr.mc >> 32),
+                    static_cast<uint32_t>(p72Tmr.pa),
+                    static_cast<uint32_t>(p72Tmr.pa >> 32),
+                    static_cast<uint32_t>(p72Tmr.naturalAligned),
+                    static_cast<uint32_t>(p72Tmr.insideVisibleVram),
+                    static_cast<uint32_t>(p72Tmr.noOverlap),
+                    static_cast<uint32_t>(p72Tmr.ownershipVerified),
+                    static_cast<uint32_t>(p72Tmr.mayWriteVram),
+                    static_cast<uint32_t>(p72Tmr.mayIssueSetupTmr)
+                };
+                rnPublish(this, "navi33-p7-tmr-plan",
+                          p72n, p72v, sizeof(p72v) / sizeof(p72v[0]));
+
                 rn_navi33::p7_postpsp::Input postInput{};
                 postInput.pspAlive = p7SosAfter != 0;
                 postInput.gartReady = p7GartReady;
@@ -4981,12 +5050,13 @@ bool RedNaviProbe::start(IOService *provider) {
                 postInput.ringCreated = p71RingCreated;
                 postInput.tocAccepted = p71TocAccepted;
                 postInput.tmrBytes = p71TmrBytes;
-                // Deliberately false until a real TMR reservation ledger is
-                // implemented. Same-card Linux evidence is observation, not
-                // ownership.
-                postInput.tmrOwnershipVerified = false;
+                postInput.tmrOwnershipVerified =
+                    p72Tmr.ownershipVerified;
+                postInput.tmrMc = p72Tmr.mc;
                 postInput.fbStart = stageGeometry.geometry.mcStart.value;
                 postInput.fbBytes = stageGeometry.geometry.usableVramBytes;
+                // Step 4 intentionally stops before the first PMFW command.
+                postInput.pmfwLoaded = false;
                 const auto postGate =
                     rn_navi33::p7_postpsp::inspect(postInput);
 
@@ -4994,7 +5064,7 @@ bool RedNaviProbe::start(IOService *provider) {
                     "step", "mapping_error", "runtime_dma_prepared",
                     "runtime_mapped", "ring_created", "toc_accepted",
                     "toc_status", "tmr_bytes", "post_gate_error",
-                    "may_setup_tmr", "may_load_ip_fw",
+                    "may_load_pmfw", "may_setup_tmr", "may_load_ip_fw",
                     "may_start_mes"
                 };
                 const uint32_t p71v[] = {
@@ -5005,6 +5075,7 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(p71TocAccepted),
                     p71TocStatus, p71TmrBytes,
                     static_cast<uint32_t>(postGate.error),
+                    static_cast<uint32_t>(postGate.mayLoadPmfw),
                     static_cast<uint32_t>(postGate.maySetupTmr),
                     static_cast<uint32_t>(postGate.mayLoadIpFirmware),
                     static_cast<uint32_t>(postGate.mayStartMes)
