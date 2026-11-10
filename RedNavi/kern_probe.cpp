@@ -323,6 +323,7 @@ class RedNaviProbe : public IOService {
     // Last P7 GPCOM submission telemetry.
     uint32_t p7SubmitWptrBefore {0};
     uint32_t p7SubmitWptrAfter {0};
+    uint32_t p7SubmitFenceBefore {0};
     uint32_t p7SubmitFenceExpected {0};
     uint32_t p7SubmitFenceObserved {0};
     uint32_t p7SubmitPolls {0};
@@ -857,7 +858,15 @@ bool RedNaviProbe::pspSubmitP7(
     uint8_t *cmd = base + 4096;
     uint8_t *fence = base + 8192;
     memset(cmd, 0, 4096);
-    memset(fence, 0, 4096);
+
+    // Linux clears the PSP fence buffer once before ring initialization,
+    // then leaves the previous fence value in place across submissions.
+    // Preserve that behavior so the next command advances 1 -> 2 rather
+    // than forcing the shared fence back to zero.
+    volatile uint32_t *fenceValue =
+        reinterpret_cast<volatile uint32_t *>(fence);
+    OSSynchronizeIO();
+    p7SubmitFenceBefore = *fenceValue;
 
     *reinterpret_cast<uint32_t *>(cmd + 8) = cmdId;
     for (uint32_t n = 0; n < nargs; ++n)
@@ -868,7 +877,7 @@ bool RedNaviProbe::pspSubmitP7(
     p7SubmitWptrBefore = wptr;
     p7SubmitWptrAfter = wptr;
     p7SubmitFenceExpected = 0;
-    p7SubmitFenceObserved = 0;
+    p7SubmitFenceObserved = p7SubmitFenceBefore;
     p7SubmitPolls = 0;
     if ((wptr & 15u) || wptr >= ringDw) return false;
 
@@ -891,9 +900,7 @@ bool RedNaviProbe::pspSubmitP7(
     wr(r67, nextWptr);
     p7SubmitWptrAfter = rd(r67);
 
-    volatile uint32_t *fenceValue =
-        reinterpret_cast<volatile uint32_t *>(fence);
-    uint32_t observed = 0;
+    uint32_t observed = p7SubmitFenceBefore;
     for (uint32_t ms = 0;
          ms < rn_navi33::p7_pmfw::kFenceTimeoutMs; ++ms) {
         OSSynchronizeIO();
@@ -5024,6 +5031,35 @@ bool RedNaviProbe::start(IOService *provider) {
                 p7Input.secureOsAlive = p7SosAfter != 0;
                 const auto p7AfterPsp =
                     rn_navi33::p7_runtime::inspect(p7Input);
+                // P7.3 metadata and PMFW staging ownership are prepared
+                // before the PSP GPCOM ring is created. Linux constructs
+                // firmware.fw_buf before PSP hw_init and does not mutate the
+                // active VMID0 mapping between LOAD_TOC and LOAD_IP_FW.
+                bool p73PmfwPresent = false;
+                bool p73PmfwMetadataVerified = false;
+                bool p73PmfwDigestTrusted = false;
+                uint32_t p73PmfwVersion = 0;
+                uint32_t p73PmfwBytes = 0;
+#if defined(RN_HAVE_SMU_FW)
+                p73PmfwPresent = true;
+#if defined(RN_SMU_FW_METADATA_V1)
+                p73PmfwMetadataVerified = true;
+                p73PmfwDigestTrusted =
+                    RN_SMU_FW_DIGEST_TRUSTED == 1;
+                p73PmfwVersion = kRNSmuFwVersion;
+                p73PmfwBytes = kRNSmuFwSize;
+#endif
+#endif
+                const uint64_t p73StageGpuVa =
+                    gartPlan.gartStart +
+                    static_cast<uint64_t>(
+                        rn_navi33::p7_pmfw::kStageFirstPage) * 4096ull;
+                uint32_t p73MappingError = 0;
+                bool p73StagePrepared = false;
+                bool p73StageMapped = false;
+                bool p73StagePteVerified = false;
+                uint32_t p73BadPte = 0xffffffffu;
+
                 uint32_t p71MappingError = 0;
                 bool p71RuntimeMapped = false;
                 bool p71RingCreated = false;
@@ -5066,10 +5102,54 @@ bool RedNaviProbe::start(IOService *provider) {
                             break;
                         }
                     }
+                    // Step 5 pre-stages PMFW into the same VMID0 page
+                    // table before the GPCOM ring is created. After this one
+                    // invalidate, the ring lifetime does not modify GART.
+#if defined(RN_HAVE_SMU_FW)
+                    if (ptesOk && p7StepArg >= 5u &&
+                        p73PmfwPresent &&
+                        p73PmfwMetadataVerified &&
+                        p73PmfwDigestTrusted &&
+                        prepareNavi33PmfwDma(
+                            kRNSmuFwSize, &p73MappingError)) {
+                        p73StagePrepared = true;
+                        uint8_t *const stage =
+                            static_cast<uint8_t *>(
+                                navi33PmfwBuf->getBytesNoCopy());
+                        memset(stage, 0, navi33PmfwStageBytes);
+                        memcpy(stage, kRNSmuFw, kRNSmuFwSize);
+                        OSSynchronizeIO();
+
+                        bool stagePtesOk = true;
+                        for (uint32_t p = 0;
+                             p < navi33PmfwPageCount; ++p) {
+                            const uint32_t index =
+                                rn_navi33::p7_pmfw::kStageFirstPage + p;
+                            rn_gart_map_page(
+                                &gpu, &p7Gmc, index,
+                                navi33PmfwPages[p]);
+                            const uint64_t got =
+                                rn_gart_read_pte(&gpu, &p7Gmc, index);
+                            const uint64_t expected =
+                                rn_system_pte(navi33PmfwPages[p]);
+                            if (got != expected) {
+                                stagePtesOk = false;
+                                p73BadPte = index;
+                                break;
+                            }
+                        }
+                        p73StagePteVerified = stagePtesOk;
+                    }
+#endif
                     if (ptesOk) {
                         rn_mmhub_prepare_invalidation(&gpu);
-                        p71RuntimeMapped = rn_mmhub_gart_flush(&gpu) == 0;
+                        p71RuntimeMapped =
+                            rn_mmhub_gart_flush(&gpu) == 0;
+                        if (p73StagePteVerified)
+                            p73StageMapped = p71RuntimeMapped;
                     }
+                    if (p73StageMapped)
+                        navi33PmfwMapped = true;
                     if (p71RuntimeMapped) {
                         navi33PspRuntimeMapped = true;
                         p71RingCreated = createPspRingP7(p71RingGpuVa);
@@ -5174,32 +5254,10 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-p7-tmr-plan",
                           p72n, p72v, sizeof(p72v) / sizeof(p72v[0]));
 
-                // P7.3 Step 5: PMFW-only PSP checkpoint.  Linux loads
-                // PMFW before SETUP_TMR on MP0 13.0.7 because centralized
-                // C-state management is enabled.  Reuse the already-verified
-                // fw_pri GART VA as the temporary firmware source; the PSP
-                // KM/GPCOM ring copies it into its managed destination.
-                bool p73PmfwPresent = false;
-                bool p73PmfwMetadataVerified = false;
-                bool p73PmfwDigestTrusted = false;
-                uint32_t p73PmfwVersion = 0;
-                uint32_t p73PmfwBytes = 0;
-#if defined(RN_HAVE_SMU_FW)
-                p73PmfwPresent = true;
-#if defined(RN_SMU_FW_METADATA_V1)
-                p73PmfwMetadataVerified = true;
-                p73PmfwDigestTrusted =
-                    RN_SMU_FW_DIGEST_TRUSTED == 1;
-                p73PmfwVersion = kRNSmuFwVersion;
-                p73PmfwBytes = kRNSmuFwSize;
-#endif
-#endif
-
-                const uint64_t p73StageGpuVa =
-                    gartPlan.gartStart +
-                    static_cast<uint64_t>(
-                        rn_navi33::p7_pmfw::kStageFirstPage) * 4096ull;
-
+                // P7.3 Step 5: PMFW-only PSP checkpoint. Linux loads
+                // PMFW before SETUP_TMR on MP0 13.0.7. The firmware staging
+                // was already mapped before ring creation above, so no GART
+                // mutation occurs between LOAD_TOC and LOAD_IP_FW.
                 rn_navi33::p7_pmfw::Input p73Input{};
                 p73Input.requested = p7StepArg >= 5u;
                 p73Input.pspReady =
@@ -5217,11 +5275,6 @@ bool RedNaviProbe::start(IOService *provider) {
                 const auto p73Gate =
                     rn_navi33::p7_pmfw::inspect(p73Input);
 
-                uint32_t p73MappingError = 0;
-                bool p73StagePrepared = false;
-                bool p73StageMapped = false;
-                bool p73StagePteVerified = false;
-                uint32_t p73BadPte = 0xffffffffu;
                 bool p73FenceOk = false;
                 bool p73PmfwAccepted = false;
                 uint32_t p73Status = 0xffffffffu;
@@ -5235,76 +5288,42 @@ bool RedNaviProbe::start(IOService *provider) {
                 // submission when PMFW staging itself fails.
                 p7SubmitWptrBefore = 0;
                 p7SubmitWptrAfter = 0;
+                p7SubmitFenceBefore = 0;
                 p7SubmitFenceExpected = 0;
                 p7SubmitFenceObserved = 0;
                 p7SubmitPolls = 0;
 
 #if defined(RN_HAVE_SMU_FW)
                 if (p73Gate.mayLoadPmfw &&
-                    prepareNavi33PmfwDma(
-                        kRNSmuFwSize, &p73MappingError)) {
-                    p73StagePrepared = true;
+                    p73StagePrepared &&
+                    p73StageMapped &&
+                    p73StagePteVerified &&
+                    navi33PmfwBuf &&
+                    navi33PmfwBuf->getBytesNoCopy()) {
+                    const uint32_t pmfwArgs[4] = {
+                        static_cast<uint32_t>(p73StageGpuVa),
+                        static_cast<uint32_t>(p73StageGpuVa >> 32),
+                        static_cast<uint32_t>(kRNSmuFwSize),
+                        kRNPspFwTypeSmu
+                    };
+                    uint32_t pmfwResp[4] = {};
+                    p73FenceOk = pspSubmitP7(
+                        p71RingGpuVa, p71CmdGpuVa,
+                        p71FenceGpuVa,
+                        kRNPspCmdLoadIpFw, pmfwArgs, 4,
+                        pmfwResp, 4);
+                    p73Status = pmfwResp[0];
+                    p73FwAddrLo = pmfwResp[2];
+                    p73FwAddrHi = pmfwResp[3];
+                    p73PmfwAccepted =
+                        p73FenceOk && p73Status == 0;
 
-                    bool ptesOk = true;
-                    for (uint32_t p = 0;
-                         p < navi33PmfwPageCount; ++p) {
-                        const uint32_t index =
-                            rn_navi33::p7_pmfw::kStageFirstPage + p;
-                        rn_gart_map_page(
-                            &gpu, &p7Gmc, index,
-                            navi33PmfwPages[p]);
-                        const uint64_t got =
-                            rn_gart_read_pte(&gpu, &p7Gmc, index);
-                        const uint64_t expected =
-                            rn_system_pte(navi33PmfwPages[p]);
-                        if (got != expected) {
-                            ptesOk = false;
-                            p73BadPte = index;
-                            break;
-                        }
-                    }
-                    p73StagePteVerified = ptesOk;
-
-                    if (ptesOk) {
-                        rn_mmhub_prepare_invalidation(&gpu);
-                        p73StageMapped =
-                            rn_mmhub_gart_flush(&gpu) == 0;
-                    }
-                    if (p73StageMapped) {
-                        navi33PmfwMapped = true;
-                        uint8_t *const stage =
-                            static_cast<uint8_t *>(
-                                navi33PmfwBuf->getBytesNoCopy());
-                        memset(stage, 0, navi33PmfwStageBytes);
-                        memcpy(stage, kRNSmuFw, kRNSmuFwSize);
-                        OSSynchronizeIO();
-
-                        const uint32_t pmfwArgs[4] = {
-                            static_cast<uint32_t>(p73StageGpuVa),
-                            static_cast<uint32_t>(
-                                p73StageGpuVa >> 32),
-                            static_cast<uint32_t>(kRNSmuFwSize),
-                            kRNPspFwTypeSmu
-                        };
-                        uint32_t pmfwResp[4] = {};
-                        p73FenceOk = pspSubmitP7(
-                            p71RingGpuVa, p71CmdGpuVa,
-                            p71FenceGpuVa,
-                            kRNPspCmdLoadIpFw, pmfwArgs, 4,
-                            pmfwResp, 4);
-                        p73Status = pmfwResp[0];
-                        p73FwAddrLo = pmfwResp[2];
-                        p73FwAddrHi = pmfwResp[3];
-                        p73PmfwAccepted =
-                            p73FenceOk && p73Status == 0;
-
-                        // Read-only observation. Do not send an SMU mailbox
-                        // message at Step 5.
-                        uint32_t mp1Base = 0;
-                        if (ipBase(kRNHwIdMp1, &mp1Base)) {
-                            p73SmuRespAfter =
-                                rd((mp1Base + 0x29au) * 4);
-                        }
+                    // Read-only observation. Do not send an SMU mailbox
+                    // message at Step 5.
+                    uint32_t mp1Base = 0;
+                    if (ipBase(kRNHwIdMp1, &mp1Base)) {
+                        p73SmuRespAfter =
+                            rd((mp1Base + 0x29au) * 4);
                     }
                 }
 #endif
@@ -5320,7 +5339,7 @@ bool RedNaviProbe::start(IOService *provider) {
                     "stage_bad_pte", "stage_mapping_error",
                     "stage_va_lo", "stage_va_hi",
                     "submit_wptr_before", "submit_wptr_after",
-                    "fence_expected", "fence_observed",
+                    "fence_before", "fence_expected", "fence_observed",
                     "fence_polls", "fence_timeout_ms",
                     "fence_ok", "status", "fw_addr_lo", "fw_addr_hi",
                     "accepted", "smu_response_before",
@@ -5347,6 +5366,7 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(p73StageGpuVa),
                     static_cast<uint32_t>(p73StageGpuVa >> 32),
                     p7SubmitWptrBefore, p7SubmitWptrAfter,
+                    p7SubmitFenceBefore,
                     p7SubmitFenceExpected, p7SubmitFenceObserved,
                     p7SubmitPolls,
                     rn_navi33::p7_pmfw::kFenceTimeoutMs,
