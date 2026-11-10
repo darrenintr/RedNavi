@@ -5275,11 +5275,6 @@ bool RedNaviProbe::start(IOService *provider) {
                 const auto p73Gate =
                     rn_navi33::p7_pmfw::inspect(p73Input);
 
-                uint32_t p73MappingError = 0;
-                bool p73StagePrepared = false;
-                bool p73StageMapped = false;
-                bool p73StagePteVerified = false;
-                uint32_t p73BadPte = 0xffffffffu;
                 bool p73FenceOk = false;
                 bool p73PmfwAccepted = false;
                 uint32_t p73Status = 0xffffffffu;
@@ -5293,6 +5288,7 @@ bool RedNaviProbe::start(IOService *provider) {
                 // submission when PMFW staging itself fails.
                 p7SubmitWptrBefore = 0;
                 p7SubmitWptrAfter = 0;
+                p7SubmitFenceBefore = 0;
                 p7SubmitFenceExpected = 0;
                 p7SubmitFenceObserved = 0;
                 p7SubmitPolls = 0;
@@ -5343,7 +5339,7 @@ bool RedNaviProbe::start(IOService *provider) {
                     "stage_bad_pte", "stage_mapping_error",
                     "stage_va_lo", "stage_va_hi",
                     "submit_wptr_before", "submit_wptr_after",
-                    "fence_expected", "fence_observed",
+                    "fence_before", "fence_expected", "fence_observed",
                     "fence_polls", "fence_timeout_ms",
                     "fence_ok", "status", "fw_addr_lo", "fw_addr_hi",
                     "accepted", "smu_response_before",
@@ -5370,6 +5366,7 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(p73StageGpuVa),
                     static_cast<uint32_t>(p73StageGpuVa >> 32),
                     p7SubmitWptrBefore, p7SubmitWptrAfter,
+                    p7SubmitFenceBefore,
                     p7SubmitFenceExpected, p7SubmitFenceObserved,
                     p7SubmitPolls,
                     rn_navi33::p7_pmfw::kFenceTimeoutMs,
