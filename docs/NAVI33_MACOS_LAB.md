@@ -418,7 +418,7 @@ dummy pages immediately below it. DMA ownership also remained verified.
 
 #### P6.5 software VRAM reservation ledger
 
-P4 `0.0.9` adds a second explicit opt-in:
+P4 `0.0.9` added a second explicit opt-in:
 `rednavi_navi33_vram_owner_probe=1`.
 When P5 geometry and the decoded boot framebuffer evidence are valid,
 and the normal RedNavi VRAM allocator is still inactive, the Kext may
@@ -441,28 +441,60 @@ runtime claim, not proof that every firmware agent will forever ignore
 the bytes. P4 0.0.9 still performs no VRAM write, PTE install, hub
 programming, TLB invalidation, firmware copy or PSP command.
 
+Native P4 `0.0.9` passed this checkpoint on 2026-11-10:
+`navi33-vram-reservation-ledger.error=0`,
+`ledger_owned=1`, `reserved_bytes=1056768`,
+`allocator_carve_required=1`, and all write permissions remained zero.
+The independent DMA owner remained verified, so
+`navi33-gart-owner-plan` advanced to `error=0`,
+`vram_owner=1`, `dma_owner=1`, and
+`ownership_verified=1`, while `may_program_gart=0`.
+P6 staging still stopped at `NoFirmwareProof`.
+
+#### P6.6 allocator carve + runtime quiescence audit
+
+P4 `0.0.10` adds a third software-only probe:
+`rednavi_navi33_allocator_carve_probe=1`.
+
+The audit models the existing production visible-VRAM allocator's upper
+segment `0x0d000000..0x10000000` (12288 pages) and subtracts the P6.5
+owned tail `0x0fefe000..0x10000000` (258 pages). The expected remaining
+free segment is `0x0d000000..0x0fefe000` (12030 pages). Page accounting
+must satisfy `before = reserved + after`.
+
+Before accepting that carve plan, the runtime must also be quiescent:
+`gpuLive=0`, `vmReady=0`, `gfxQueueOk=0`,
+`fbReady=0`, `boCount=0`, and `vmidUsed=0`.
+The boot framebuffer itself is already handled separately by the decoded
+IONDRV non-overlap evidence.
+
+P6.6 still does not mutate `visPool`, write VRAM, install a PTE,
+program GFXHUB/MMHUB, invalidate TLBs, copy firmware or issue PSP commands.
+
 ### Next verified hardware checkpoint
 
-Build P4 0.0.9 with both isolated-test boot args:
-`rednavi_navi33_dma_owner_probe=1` and
-`rednavi_navi33_vram_owner_probe=1`.
+Build P4 0.0.10 with all three isolated-test boot args:
+`rednavi_navi33_dma_owner_probe=1`,
+`rednavi_navi33_vram_owner_probe=1`, and
+`rednavi_navi33_allocator_carve_probe=1`.
 
-Expected:
-- `navi33-vram-reservation-ledger.error=0`
-- `ledger_owned=1`
-- `reserved_bytes=1056768`
-- `allocator_carve_required=1`
+Expected `navi33-p6-allocator-carve`:
+- `error=0`
+- `quiescent=1`
+- `before_pages=12288`
+- `reserved_pages=258`
+- `after_pages=12030`
+- `left_start=0x0d000000`
+- `left_bytes=0x02efe000`
+- `right_bytes=0`
+- `carve_verified=1`
+- `may_mutate_allocator=0`
 - `may_write_vram=0`
-- `may_install_gart_ptes=0`
-- DMA owner remains `owner_verified=1`
-- `navi33-gart-owner-plan.error=0`
-- GART `vram_owner=1`, `dma_owner=1`,
-  `ownership_verified=1`, but `may_program_gart=0`
 
-P6 staging should still stop at `NoFirmwareProof`; Linux-parity
-hardware init should remain disabled. Only after this checkpoint should
-the next stage add a read-only/quiescence audit and allocator carve
-before any first PTE/VRAM write. MES remains later. The historical Cobalt64
+The P6.5 ledger and GART ownership plan must remain valid. Only after
+this native checkpoint should the same verified carve be wired into the
+actual visible-VRAM allocator initialization. The first PTE/VRAM write
+remains a separate later stage; PSP firmware and MES remain later. The historical Cobalt64
 compute proof was in a specific RX7600 GPU-passthrough environment;
 its absolute GPU VM/VRAM ownership must be revalidated on bare-metal
 Sequoia.
