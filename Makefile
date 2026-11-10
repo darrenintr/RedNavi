@@ -26,7 +26,7 @@ CXXFLAGS := $(ARCH) $(OPT) -std=c++17 -fno-rtti -fno-exceptions -fno-builtin -fn
 	-nostdinc -isystem $(SDK)/Headers -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE \
 	-DAPPLE -DNeXT -mmacosx-version-min=12.0 -Wall -Icompat/include
 # Optional local firmware component (python3 tools/gen_psp_fw_header.py ... RedNavi/psp_fw.h).
-ifneq ($(wildcard RedNavi/psp_fw.h RedNavi/dmub_fw.h),)
+ifneq ($(wildcard RedNavi/psp_fw.h),)
 CXXFLAGS += -DRN_HAVE_PSP_FW
 endif
 ifneq ($(wildcard RedNavi/smu_fw.h),)
@@ -229,6 +229,8 @@ test:
 	./build/navi33_p6_staging_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_gart_owner_test.cpp -o build/navi33_gart_owner_test
 	./build/navi33_gart_owner_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_fw_pri_dma_owner_test.cpp -o build/navi33_fw_pri_dma_owner_test
+	./build/navi33_fw_pri_dma_owner_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_linux_boot_parity_test.cpp -o build/navi33_linux_boot_parity_test
 	./build/navi33_linux_boot_parity_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/dma_pages_test.cpp -o build/dma_pages_test
