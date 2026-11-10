@@ -102,9 +102,17 @@
 #include "navi33_runtime.h"
 #include "navi33_bootstrap.h"
 #include "navi33_p6_psp_preflight.h"
+#include "navi33_p6_psp_boot_plan.h"
+#include "navi33_p6_psp_staging.h"
+#include "navi33_gart_owner.h"
+#include "navi33_fw_pri_dma_owner.h"
+#include "navi33_vram_reservation.h"
+#include "navi33_vram_ledger.h"
+#include "navi33_allocator_carve.h"
 #include "navi33_linux_boot_parity.h"
 #include "navi33_address_spaces.h"
 #include "navi33_m4_asic.h"
+#include "navi33_probe_admission.h"
 
 #ifdef RN_HAVE_PSP_FW
 #include "psp_fw.h"
@@ -278,6 +286,20 @@ class RedNaviProbe : public IOService {
     IODMACommand *hostDma {nullptr};
     uint64_t hostBus {0};                          // its bus address as the device must use it
     uint32_t hostBusLen {0};
+    // P6.4 ownership-only PSP fw_pri backing. This allocation may obtain IOVA
+    // mappings from IOKit, but is NEVER installed into the GPU GART in P4.
+    IOBufferMemoryDescriptor *navi33FwPriBuf {nullptr};
+    IODMACommand *navi33FwPriDma {nullptr};
+    uint64_t *navi33FwPriPages {nullptr};
+    uint32_t navi33FwPriPageCount {0};
+    uint64_t navi33FwPriBytes {0};
+    bool navi33FwPriPrepared {false};
+    // P6.5 software-only VRAM reservation. These offsets are bookkeeping
+    // claims only; P4 never writes them or exposes them to the GPU.
+    bool navi33VramLedgerOwned {false};
+    uint64_t navi33VramPtOffset {0};
+    uint64_t navi33VramScratchOffset {0};
+    uint64_t navi33VramDummyOffset {0};
     // Buffer objects: pages of host memory with an address in the GART window that is never reused (see docs/COMPAT.md on remapping).
     // gpuVa: the buffer's address in the GART window (0 for a buffer that is not mapped there); bus: the bus address of each of its 4 KB pages, from which the user address spaces get their PTEs.
     // A VRAM buffer has no md/dma/bus: vramOff is its offset in VRAM (physically contiguous, 4 KB aligned), dom is RN_BO_VRAM or RN_BO_VRAM_VISIBLE, and a visible one has vmd, the
@@ -464,6 +486,8 @@ private:
     uint32_t pspTmrSize {0};
     uint32_t pspFence {0};
     void dumpRegs(const RNMailboxReg *list, size_t count, const char *property);
+    bool prepareNavi33FwPriDma(bool enabled, uint32_t *mappingError);
+    void releaseNavi33FwPriDma();
 
 public:
     bool start(IOService *provider) override;
@@ -471,6 +495,94 @@ public:
 };
 
 OSDefineMetaClassAndStructors(RedNaviProbe, IOService)
+
+void RedNaviProbe::releaseNavi33FwPriDma() {
+    if (navi33FwPriDma) {
+        // clearMemoryDescriptor(autoComplete=true) releases the active DMA
+        // mapping created by setMemoryDescriptor(autoPrepare=true).
+        navi33FwPriDma->clearMemoryDescriptor();
+        navi33FwPriDma->release();
+        navi33FwPriDma = nullptr;
+    }
+    if (navi33FwPriPages) {
+        IOFree(navi33FwPriPages,
+               sizeof(uint64_t) * rn_navi33::fw_pri_owner::kPages);
+        navi33FwPriPages = nullptr;
+    }
+    if (navi33FwPriBuf) {
+        navi33FwPriBuf->release();
+        navi33FwPriBuf = nullptr;
+    }
+    navi33FwPriPageCount = 0;
+    navi33FwPriBytes = 0;
+    navi33FwPriPrepared = false;
+}
+
+bool RedNaviProbe::prepareNavi33FwPriDma(bool enabled,
+                                        uint32_t *mappingError) {
+    if (mappingError) *mappingError = 0;
+    if (!enabled) return false;
+    if (navi33FwPriPrepared && navi33FwPriBuf && navi33FwPriDma &&
+        navi33FwPriPages &&
+        navi33FwPriPageCount == rn_navi33::fw_pri_owner::kPages &&
+        navi33FwPriBytes == rn_navi33::fw_pri_owner::kBytes)
+        return true;
+
+    releaseNavi33FwPriDma();
+
+    navi33FwPriBuf = IOBufferMemoryDescriptor::inTaskWithOptions(
+        kernel_task, kIODirectionInOut,
+        rn_navi33::fw_pri_owner::kBytes, 4096);
+    if (!navi33FwPriBuf) return false;
+    void *cpu = navi33FwPriBuf->getBytesNoCopy();
+    if (!cpu) {
+        releaseNavi33FwPriDma();
+        return false;
+    }
+    memset(cpu, 0, rn_navi33::fw_pri_owner::kBytes);
+
+    navi33FwPriDma = IODMACommand::withSpecification(
+        kIODMACommandOutputHost64,
+        rn_navi33::fw_pri_owner::kDmaAddressBits,
+        0, IODMACommand::kMapped,
+        rn_navi33::fw_pri_owner::kBytes, 4096, nullptr, nullptr);
+    if (!navi33FwPriDma ||
+        navi33FwPriDma->setMemoryDescriptor(navi33FwPriBuf) != kIOReturnSuccess) {
+        releaseNavi33FwPriDma();
+        return false;
+    }
+
+    navi33FwPriPages = static_cast<uint64_t *>(
+        IOMalloc(sizeof(uint64_t) * rn_navi33::fw_pri_owner::kPages));
+    if (!navi33FwPriPages) {
+        releaseNavi33FwPriDma();
+        return false;
+    }
+
+    const auto mapping = rn_dma::collectPages<IODMACommand::Segment64>(
+        navi33FwPriPages, rn_navi33::fw_pri_owner::kPages,
+        rn_navi33::fw_pri_owner::kBytes,
+        [this](uint64_t *offset, IODMACommand::Segment64 *segments,
+               uint32_t *count) {
+            UInt64 dmaOffset = *offset;
+            UInt32 dmaCount = *count;
+            const IOReturn rc = navi33FwPriDma->genIOVMSegments(
+                &dmaOffset, segments, &dmaCount);
+            *offset = dmaOffset;
+            *count = dmaCount;
+            return rc == kIOReturnSuccess;
+        });
+    if (!mapping.ok()) {
+        if (mappingError) *mappingError = static_cast<uint32_t>(mapping.error);
+        releaseNavi33FwPriDma();
+        return false;
+    }
+
+    navi33FwPriPageCount = mapping.pageCount;
+    navi33FwPriBytes = mapping.bytes;
+    navi33FwPriPrepared = true;
+    return true;
+}
 
 void RedNaviProbe::dumpPci() {
     uint32_t id = pci->configRead32(0x00);
@@ -3654,6 +3766,34 @@ bool RedNaviProbe::start(IOService *provider) {
     pci = OSDynamicCast(IOPCIDevice, provider);
     if (!pci) return false;
 
+    // The RX 7600 is currently the native macOS boot/display device.
+    // Its P4 "read" sequence modifies MM_INDEX and setMemoryEnable changes
+    // PCI command state. Neither is a harmless IORegistry-only diagnostic.
+    // Fail closed before allocations, PCI config writes or BAR mappings.
+    // This is not a runtime safety certification even in an opt-in build.
+    const uint16_t vendorId = pci->configRead16(kIOPCIConfigVendorID);
+    const uint16_t deviceId = pci->configRead16(kIOPCIConfigDeviceID);
+    if (vendorId == 0x1002u && deviceId == 0x7480u) {
+#if defined(RN_ENABLE_NAVI33_UNSAFE_P4)
+        constexpr bool kExperimentalP4Built = true;
+#else
+        constexpr bool kExperimentalP4Built = false;
+#endif
+        uint32_t explicitOptIn = 0;
+        PE_parse_boot_argn("rednavi_navi33_unsafe_p4", &explicitOptIn,
+                           sizeof(explicitOptIn));
+        const auto admission = rn_navi33::admitEarlyHardwareProbe(
+            vendorId, deviceId, kExperimentalP4Built, explicitOptIn);
+        if (admission != rn_navi33::ProbeAdmission::ExperimentalOnly) {
+            IOLog("RedNavi: RX7600 hardware P4 refused (reason %u); "
+                  "no BAR mapping, PCI memory-enable or MM_INDEX access\n",
+                  static_cast<unsigned>(admission));
+            return false;
+        }
+        IOLog("RedNavi: WARNING unsafe Navi33 P4 explicitly enabled; "
+              "this may hang the sole GPU/display\n");
+    }
+
     modeLock = IOLockAlloc();
     boLock = IOLockAlloc();
     bos = static_cast<RNBo *>(IOMalloc(sizeof(RNBo) * kBoCap));
@@ -3725,9 +3865,9 @@ bool RedNaviProbe::start(IOService *provider) {
                     gpu.reg_offset[RN_DCE_HWIP][0][i] = ips.dmu.dwords[i];
                 setProperty("navi33-ip-bases-ready", true);
 
-                // P5 preflight reads actual MMHUB FB_LOCATION_BASE/TOP/OFFSET
-                // and firmware mailbox status. No Navi32 constant is used.
-                // These reads access real GPU registers, not host fixtures.
+                // P5 reads Navi33 MMHUB 3.0.2 FB_LOCATION_BASE/TOP/OFFSET.
+                // Register offsets come from mmhub_3_0_2_offset.h, not MMHUB 3.0.0.
+                // PSP/SMU mailbox status is reported separately. These are live GPU reads.
                 auto readBar = [&](uint32_t base, uint32_t dword, uint32_t *out) -> bool {
                     uint32_t byteOff = 0;
                     if (!rn_navi33::checkedBarDword(base, dword, regs->getLength(), &byteOff))
@@ -3740,9 +3880,9 @@ bool RedNaviProbe::start(IOService *provider) {
                     kIOPCIConfigBaseAddress0 + kRNVramBar * 4);
                 const uint64_t bar0Bytes = aperture ? aperture->getLength() : 0;
                 const bool mmhubRead =
-                    readBar(ips.mmhub.dwords[0], 0x8ec, &fbBase) &&
-                    readBar(ips.mmhub.dwords[0], 0x8ed, &fbTop) &&
-                    readBar(ips.mmhub.dwords[0], 0x8d7, &fbOffset);
+                    readBar(ips.mmhub.dwords[0], rn_navi33::mmhub_v3_0_2::kFbLocationBaseDword, &fbBase) &&
+                    readBar(ips.mmhub.dwords[0], rn_navi33::mmhub_v3_0_2::kFbLocationTopDword, &fbTop) &&
+                    readBar(ips.mmhub.dwords[0], rn_navi33::mmhub_v3_0_2::kFbOffsetDword, &fbOffset);
                 bool p6MemoryVerified = false;
                 uint32_t gfxFbOffsetRaw = 0;
                 const bool gfxFbOffsetRead = readBar(
@@ -3831,6 +3971,436 @@ bool RedNaviProbe::start(IOService *provider) {
                 };
                 rnPublish(this, "navi33-p6-psp-preflight", p6names,
                           p6values, sizeof(p6values) / sizeof(p6values[0]));
+
+                // P6.2: validate locally generated PSP13.0.7 firmware metadata,
+                // then run the staging/ownership contract. This path performs
+                // NO firmware copy, VRAM reservation, ring creation or PSP MMIO.
+                rn_navi33::p6_boot::Evidence bootEvidence{};
+#if defined(RN_HAVE_PSP_FW) && defined(RN_PSP_FW_METADATA_V1)
+                bootEvidence.major = static_cast<uint8_t>(kRNPspTargetMajor);
+                bootEvidence.minor = static_cast<uint8_t>(kRNPspTargetMinor);
+                bootEvidence.revision = static_cast<uint8_t>(kRNPspTargetRevision);
+                bootEvidence.exactTargetName = kRNPspExactTargetName != 0;
+                bootEvidence.sourceDigestPresent =
+                    sizeof(kRNPspSourceSha256) == 65u && kRNPspSourceSha256[0] != '\0';
+                bootEvidence.sourceBytes = kRNPspSourceBytes;
+                bootEvidence.componentMask = kRNPspComponentMask;
+                bootEvidence.maxComponentBytes = kRNPspMaxComponentBytes;
+#endif
+                const auto bootFirmware = rn_navi33::p6_boot::inspect(bootEvidence);
+                const char *const bfn[] = {
+                    "error", "metadata_verified", "target_major", "target_minor",
+                    "target_revision", "source_bytes", "component_mask",
+                    "required_mask", "max_component_bytes", "stage_bytes",
+                    "may_load_psp"
+                };
+                const uint32_t bfv[] = {
+                    static_cast<uint32_t>(bootFirmware.error),
+                    static_cast<uint32_t>(bootFirmware.metadataVerified),
+                    bootEvidence.major, bootEvidence.minor, bootEvidence.revision,
+                    bootEvidence.sourceBytes, bootEvidence.componentMask,
+                    bootFirmware.requiredMask, bootEvidence.maxComponentBytes,
+                    bootFirmware.stageBytes,
+                    static_cast<uint32_t>(bootFirmware.mayLoadPsp)
+                };
+                rnPublish(this, "navi33-p6-boot-firmware", bfn, bfv,
+                          sizeof(bfv) / sizeof(bfv[0]));
+
+                const auto stageMemory = mmhubRead ?
+                    rn_navi33::makeMemoryWindow(fbBase, fbTop, fbOffset,
+                                                vramMbytes, bar0Bytes) :
+                    rn_navi33::MemoryWindow{};
+                const auto stageGeometry = rn_navi33::address::makeGeometry(
+                    stageMemory, gfxFbOffsetRaw, gfxFbOffsetRead);
+
+                // P6.4b read-only boot-framebuffer evidence. PE_current_console()
+                // is XNU's current console description; on x86_64 its base is
+                // the physical framebuffer address. Translate it into a BAR0
+                // aperture offset, then compute (but do not claim) a VRAM
+                // reservation candidate for the VMID0 GART table.
+                PE_Video consoleInfo {};
+                const bool consoleRead = PE_current_console(&consoleInfo) == 0;
+                const uint64_t barPhys = aperture ?
+                    aperture->getPhysicalSegment(0, nullptr,
+                                                 kIOMemoryMapperNone) : 0ull;
+                rn_navi33::vram_reservation::Input reserveInput{};
+                reserveInput.barPhys = barPhys;
+                reserveInput.barBytes = bar0Bytes;
+                reserveInput.cpuVisibleBytes =
+                    stageGeometry.ok() ? stageGeometry.geometry.cpuVisibleBytes : 0ull;
+                if (consoleRead) {
+                    reserveInput.consoleRawAddress =
+                        static_cast<uint64_t>(consoleInfo.v_baseAddr);
+                    reserveInput.consoleRowBytes =
+                        static_cast<uint64_t>(consoleInfo.v_rowBytes);
+                    reserveInput.consoleHeight =
+                        static_cast<uint32_t>(consoleInfo.v_height);
+                }
+                const auto reservePlan =
+                    rn_navi33::vram_reservation::inspect(reserveInput);
+
+                const char *const fbn[] = {
+                    "error", "console_read", "bar_phys_lo", "bar_phys_hi",
+                    "bar_bytes", "console_raw_lo", "console_raw_hi",
+                    "console_phys_lo", "console_phys_hi",
+                    "physical_encoded", "row_bytes", "width", "height", "depth",
+                    "console_offset_lo", "console_offset_hi",
+                    "console_bytes", "inside_bar"
+                };
+                const uint32_t fbv[] = {
+                    static_cast<uint32_t>(reservePlan.error),
+                    static_cast<uint32_t>(consoleRead),
+                    static_cast<uint32_t>(barPhys),
+                    static_cast<uint32_t>(barPhys >> 32),
+                    static_cast<uint32_t>(bar0Bytes),
+                    static_cast<uint32_t>(reserveInput.consoleRawAddress),
+                    static_cast<uint32_t>(reserveInput.consoleRawAddress >> 32),
+                    static_cast<uint32_t>(reservePlan.consolePhys),
+                    static_cast<uint32_t>(reservePlan.consolePhys >> 32),
+                    static_cast<uint32_t>(reservePlan.consolePhysicalEncoded),
+                    static_cast<uint32_t>(reserveInput.consoleRowBytes),
+                    static_cast<uint32_t>(consoleInfo.v_width),
+                    static_cast<uint32_t>(consoleInfo.v_height),
+                    static_cast<uint32_t>(consoleInfo.v_depth),
+                    static_cast<uint32_t>(reservePlan.console.offset),
+                    static_cast<uint32_t>(reservePlan.console.offset >> 32),
+                    static_cast<uint32_t>(reservePlan.consoleBytes),
+                    static_cast<uint32_t>(reservePlan.consoleInsideBar)
+                };
+                rnPublish(this, "navi33-boot-framebuffer", fbn, fbv,
+                          sizeof(fbv) / sizeof(fbv[0]));
+
+                const char *const vrn[] = {
+                    "error", "page_table_offset", "page_table_bytes",
+                    "scratch_offset", "dummy_offset", "candidate_nonoverlap",
+                    "reservation_owned", "may_write_vram"
+                };
+                const uint32_t vrv[] = {
+                    static_cast<uint32_t>(reservePlan.error),
+                    static_cast<uint32_t>(reservePlan.pageTable.offset),
+                    static_cast<uint32_t>(reservePlan.pageTable.bytes),
+                    static_cast<uint32_t>(reservePlan.scratch.offset),
+                    static_cast<uint32_t>(reservePlan.dummy.offset),
+                    static_cast<uint32_t>(reservePlan.candidateNonOverlapping),
+                    static_cast<uint32_t>(reservePlan.reservationOwned),
+                    static_cast<uint32_t>(reservePlan.mayWriteVram)
+                };
+                rnPublish(this, "navi33-vram-reservation-candidate", vrn, vrv,
+                          sizeof(vrv) / sizeof(vrv[0]));
+
+                // P6.5: software-only ownership ledger. This claims the
+                // candidate inside RedNavi's bookkeeping, but does not touch
+                // VRAM or authorize any GART/PTE operation.
+                uint32_t vramOwnerArg = 0;
+                const bool vramOwnerRequested =
+                    stageGeometry.ok() &&
+                    reservePlan.candidateNonOverlapping &&
+                    PE_parse_boot_argn("rednavi_navi33_vram_owner_probe",
+                                       &vramOwnerArg, sizeof(vramOwnerArg)) &&
+                    vramOwnerArg == 1u;
+                rn_navi33::vram_ledger::Input ledgerInput{};
+                ledgerInput.requested = vramOwnerRequested;
+                ledgerInput.geometryVerified = stageGeometry.ok();
+                ledgerInput.consoleVerified =
+                    reservePlan.error == rn_navi33::vram_reservation::Error::Ok &&
+                    reservePlan.consoleInsideBar &&
+                    reservePlan.consolePhysicalEncoded;
+                ledgerInput.allocatorInactive = !gpuLive && !vmReady;
+                ledgerInput.cpuVisibleBytes =
+                    stageGeometry.ok() ? stageGeometry.geometry.cpuVisibleBytes : 0ull;
+                ledgerInput.console = {
+                    reservePlan.console.offset, reservePlan.console.bytes
+                };
+                ledgerInput.pageTable = {
+                    reservePlan.pageTable.offset, reservePlan.pageTable.bytes
+                };
+                ledgerInput.scratch = {
+                    reservePlan.scratch.offset, reservePlan.scratch.bytes
+                };
+                ledgerInput.dummy = {
+                    reservePlan.dummy.offset, reservePlan.dummy.bytes
+                };
+                const auto ledger =
+                    rn_navi33::vram_ledger::inspect(ledgerInput);
+
+                if (ledger.ledgerOwned) {
+                    navi33VramLedgerOwned = true;
+                    navi33VramPtOffset = reservePlan.pageTable.offset;
+                    navi33VramScratchOffset = reservePlan.scratch.offset;
+                    navi33VramDummyOffset = reservePlan.dummy.offset;
+                } else if (vramOwnerRequested) {
+                    navi33VramLedgerOwned = false;
+                    navi33VramPtOffset = 0;
+                    navi33VramScratchOffset = 0;
+                    navi33VramDummyOffset = 0;
+                }
+
+                const char *const vln[] = {
+                    "error", "requested", "geometry_verified",
+                    "console_verified", "allocator_inactive",
+                    "page_table_offset", "page_table_bytes",
+                    "scratch_offset", "dummy_offset", "reserved_bytes",
+                    "ledger_owned", "allocator_carve_required",
+                    "may_write_vram", "may_install_gart_ptes"
+                };
+                const uint32_t vlv[] = {
+                    static_cast<uint32_t>(ledger.error),
+                    static_cast<uint32_t>(vramOwnerRequested),
+                    static_cast<uint32_t>(ledgerInput.geometryVerified),
+                    static_cast<uint32_t>(ledgerInput.consoleVerified),
+                    static_cast<uint32_t>(ledgerInput.allocatorInactive),
+                    static_cast<uint32_t>(navi33VramPtOffset),
+                    static_cast<uint32_t>(reservePlan.pageTable.bytes),
+                    static_cast<uint32_t>(navi33VramScratchOffset),
+                    static_cast<uint32_t>(navi33VramDummyOffset),
+                    static_cast<uint32_t>(ledger.reservedBytes),
+                    static_cast<uint32_t>(navi33VramLedgerOwned),
+                    static_cast<uint32_t>(ledger.allocatorCarveRequired),
+                    static_cast<uint32_t>(ledger.mayWriteVram),
+                    static_cast<uint32_t>(ledger.mayInstallGartPtes)
+                };
+                rnPublish(this, "navi33-vram-reservation-ledger", vln, vlv,
+                          sizeof(vlv) / sizeof(vlv[0]));
+
+                // P6.6: software-only allocator carve + runtime quiescence
+                // audit. This models removal of the owned tail range from the
+                // future visible-VRAM allocator, but does NOT mutate visPool.
+                uint32_t carveArg = 0;
+                const bool carveRequested =
+                    navi33VramLedgerOwned &&
+                    PE_parse_boot_argn("rednavi_navi33_allocator_carve_probe",
+                                       &carveArg, sizeof(carveArg)) &&
+                    carveArg == 1u;
+                rn_navi33::allocator_carve::Input carveInput{};
+                carveInput.requested = carveRequested;
+                carveInput.ledgerOwned = navi33VramLedgerOwned;
+                carveInput.gpuLive = gpuLive;
+                carveInput.vmReady = vmReady;
+                carveInput.gfxQueueOk = gfxQueueOk;
+                carveInput.rednaviFramebufferReady = fbReady;
+                carveInput.boCount = boCount;
+                carveInput.vmidUsed = vmidUsed;
+                carveInput.reservation = {
+                    navi33VramScratchOffset,
+                    ledger.reservedBytes
+                };
+                const auto carve =
+                    rn_navi33::allocator_carve::inspect(carveInput);
+
+                const char *const can[] = {
+                    "error", "requested", "ledger_owned", "quiescent",
+                    "gpu_live", "vm_ready", "gfx_queue_ok", "fb_ready",
+                    "bo_count", "vmid_used", "pool_start", "pool_bytes",
+                    "reservation_start", "reservation_bytes",
+                    "before_pages", "reserved_pages", "after_pages",
+                    "left_start", "left_bytes", "right_start", "right_bytes",
+                    "carve_verified", "may_mutate_allocator", "may_write_vram"
+                };
+                const uint32_t cav[] = {
+                    static_cast<uint32_t>(carve.error),
+                    static_cast<uint32_t>(carveRequested),
+                    static_cast<uint32_t>(navi33VramLedgerOwned),
+                    static_cast<uint32_t>(carve.quiescent),
+                    static_cast<uint32_t>(gpuLive),
+                    static_cast<uint32_t>(vmReady),
+                    static_cast<uint32_t>(gfxQueueOk),
+                    static_cast<uint32_t>(fbReady),
+                    boCount,
+                    vmidUsed,
+                    static_cast<uint32_t>(carveInput.pool.offset),
+                    static_cast<uint32_t>(carveInput.pool.bytes),
+                    static_cast<uint32_t>(carveInput.reservation.offset),
+                    static_cast<uint32_t>(carveInput.reservation.bytes),
+                    carve.beforePages,
+                    carve.reservedPages,
+                    carve.afterPages,
+                    static_cast<uint32_t>(carve.left.offset),
+                    static_cast<uint32_t>(carve.left.bytes),
+                    static_cast<uint32_t>(carve.right.offset),
+                    static_cast<uint32_t>(carve.right.bytes),
+                    static_cast<uint32_t>(carve.carveVerified),
+                    static_cast<uint32_t>(carve.mayMutateAllocator),
+                    static_cast<uint32_t>(carve.mayWriteVram)
+                };
+                rnPublish(this, "navi33-p6-allocator-carve", can, cav,
+                          sizeof(cav) / sizeof(cav[0]));
+
+                // P6.4 ownership-only probe. Opt-in allocation of Linux's 1 MiB
+                // PSP fw_pri host backing. IOKit may create/retain DMA IOVAs,
+                // but this path NEVER writes a GPU GART PTE or hub register.
+                uint32_t dmaOwnerArg = 0;
+                const bool dmaOwnerRequested =
+                    gate.status == rn_navi33::p6_psp::Status::NeedsVerifiedFirmware &&
+                    stageGeometry.ok() &&
+                    PE_parse_boot_argn("rednavi_navi33_dma_owner_probe",
+                                       &dmaOwnerArg, sizeof(dmaOwnerArg)) &&
+                    dmaOwnerArg == 1u;
+                uint32_t dmaMappingError = 0;
+                const bool dmaOwnerPrepared =
+                    prepareNavi33FwPriDma(dmaOwnerRequested, &dmaMappingError);
+                const rn_navi33::fw_pri_owner::Input dmaOwnerInput{
+                    dmaOwnerRequested,
+                    navi33FwPriBuf != nullptr,
+                    navi33FwPriDma != nullptr && navi33FwPriPrepared,
+                    dmaOwnerPrepared,
+                    navi33FwPriBytes,
+                    navi33FwPriPageCount
+                };
+                const auto dmaOwner =
+                    rn_navi33::fw_pri_owner::inspect(dmaOwnerInput);
+
+                uint64_t dmaFirst = 0, dmaLast = 0, dmaMin = 0, dmaMax = 0;
+                bool dmaContiguous = false;
+                if (dmaOwner.ownerVerified && navi33FwPriPages &&
+                    navi33FwPriPageCount) {
+                    dmaFirst = navi33FwPriPages[0];
+                    dmaLast = navi33FwPriPages[navi33FwPriPageCount - 1u];
+                    dmaMin = dmaMax = dmaFirst;
+                    dmaContiguous = true;
+                    for (uint32_t p = 0; p < navi33FwPriPageCount; ++p) {
+                        const uint64_t a = navi33FwPriPages[p];
+                        if (a < dmaMin) dmaMin = a;
+                        if (a > dmaMax) dmaMax = a;
+                        if (p && a != navi33FwPriPages[p - 1u] + 4096ull)
+                            dmaContiguous = false;
+                    }
+                }
+                const char *const don[] = {
+                    "error", "requested", "buffer_allocated", "dma_prepared",
+                    "pages_verified", "mapping_error", "bytes", "page_count",
+                    "address_bits", "first_iova_lo", "first_iova_hi",
+                    "last_iova_lo", "last_iova_hi", "min_iova_lo",
+                    "min_iova_hi", "max_iova_lo", "max_iova_hi",
+                    "physically_contiguous_iova", "owner_verified",
+                    "gpu_mapped", "may_install_gart_ptes"
+                };
+                const uint32_t dov[] = {
+                    static_cast<uint32_t>(dmaOwner.error),
+                    static_cast<uint32_t>(dmaOwnerRequested),
+                    static_cast<uint32_t>(navi33FwPriBuf != nullptr),
+                    static_cast<uint32_t>(navi33FwPriDma != nullptr &&
+                                          navi33FwPriPrepared),
+                    static_cast<uint32_t>(dmaOwnerPrepared),
+                    dmaMappingError,
+                    static_cast<uint32_t>(navi33FwPriBytes),
+                    navi33FwPriPageCount,
+                    rn_navi33::fw_pri_owner::kDmaAddressBits,
+                    static_cast<uint32_t>(dmaFirst),
+                    static_cast<uint32_t>(dmaFirst >> 32),
+                    static_cast<uint32_t>(dmaLast),
+                    static_cast<uint32_t>(dmaLast >> 32),
+                    static_cast<uint32_t>(dmaMin),
+                    static_cast<uint32_t>(dmaMin >> 32),
+                    static_cast<uint32_t>(dmaMax),
+                    static_cast<uint32_t>(dmaMax >> 32),
+                    static_cast<uint32_t>(dmaContiguous),
+                    static_cast<uint32_t>(dmaOwner.ownerVerified),
+                    0u,
+                    static_cast<uint32_t>(dmaOwner.mayInstallGartPtes)
+                };
+                rnPublish(this, "navi33-fw-pri-dma-owner", don, dov,
+                          sizeof(dov) / sizeof(dov[0]));
+
+                // P6.3/P6.4 GART plan. The DMA owner above is real software
+                // ownership; VRAM page-table ownership remains deliberately
+                // absent, so this still cannot authorize GART programming.
+                rn_navi33::gart_owner::Input gartInput{};
+                if (stageGeometry.ok()) {
+                    gartInput.fbStart = stageGeometry.geometry.mcStart.value;
+                    gartInput.fbBytes = stageGeometry.geometry.usableVramBytes;
+                    gartInput.cpuVisibleBytes =
+                        stageGeometry.geometry.cpuVisibleBytes;
+                }
+                if (reservePlan.candidateNonOverlapping) {
+                    gartInput.pageTable = {
+                        reservePlan.pageTable.offset, reservePlan.pageTable.bytes
+                    };
+                    gartInput.scratch = {
+                        reservePlan.scratch.offset, reservePlan.scratch.bytes
+                    };
+                    gartInput.dummy = {
+                        reservePlan.dummy.offset, reservePlan.dummy.bytes
+                    };
+                }
+                // P6.5 software ownership is enough to advance the planning
+                // contract, but NOT enough to authorize a hardware write.
+                // gart_owner::Plan::mayProgramGart remains hard false.
+                gartInput.vramOwnershipVerified = navi33VramLedgerOwned;
+                gartInput.reservationMapVerified = navi33VramLedgerOwned;
+                gartInput.dmaBytes = navi33FwPriBytes;
+                gartInput.dmaPageCount = navi33FwPriPageCount;
+                gartInput.dmaMappingRetained = dmaOwner.ownerVerified;
+                gartInput.dmaPagesVerified = dmaOwner.ownerVerified;
+                const auto gartPlan = rn_navi33::gart_owner::inspect(gartInput);
+                const char *const gon[] = {
+                    "error", "gart_start_lo", "gart_start_hi",
+                    "gart_end_lo", "gart_end_hi", "gart_mib",
+                    "page_table_bytes", "reservation_candidate",
+                    "candidate_pt_offset", "vram_owner", "dma_owner",
+                    "ownership_verified", "may_program_gart"
+                };
+                const uint32_t gov[] = {
+                    static_cast<uint32_t>(gartPlan.error),
+                    static_cast<uint32_t>(gartPlan.gartStart),
+                    static_cast<uint32_t>(gartPlan.gartStart >> 32),
+                    static_cast<uint32_t>(gartPlan.gartEnd),
+                    static_cast<uint32_t>(gartPlan.gartEnd >> 32),
+                    static_cast<uint32_t>(gartInput.gartBytes >> 20),
+                    static_cast<uint32_t>(gartPlan.pageTableBytes),
+                    static_cast<uint32_t>(reservePlan.candidateNonOverlapping),
+                    static_cast<uint32_t>(reservePlan.pageTable.offset),
+                    static_cast<uint32_t>(navi33VramLedgerOwned),
+                    static_cast<uint32_t>(dmaOwner.ownerVerified),
+                    static_cast<uint32_t>(gartPlan.ownershipVerified),
+                    static_cast<uint32_t>(gartPlan.mayProgramGart)
+                };
+                rnPublish(this, "navi33-gart-owner-plan", gon, gov,
+                          sizeof(gov) / sizeof(gov[0]));
+
+                // PSP fw_pri is host DMA memory reached through VMID0/GART.
+                // Firmware provenance and VRAM/GART ownership are still
+                // independent gates, so no firmware is copied here.
+                rn_navi33::p6_staging::Input stageInput{};
+                stageInput.p6PreflightPassed =
+                    gate.status == rn_navi33::p6_psp::Status::NeedsVerifiedFirmware;
+                // A recorded SHA-256 is reproducibility metadata, not
+                // provenance proof. Keep bytes untrusted until RedNavi pins
+                // and compares an independently sourced expected digest.
+                stageInput.firmwareBytesVerified = false;
+                stageInput.firmwareMetadataVerified = bootFirmware.metadataVerified;
+                stageInput.maxFirmwareComponentBytes =
+                    bootEvidence.maxComponentBytes;
+                stageInput.gartOwnershipVerified = gartPlan.ownershipVerified;
+                stageInput.gartStart = gartPlan.gartStart;
+                stageInput.gartEnd = gartPlan.gartEnd;
+                stageInput.fwPriGpuVa = gartPlan.fwPriGpuAddress;
+                stageInput.fwPriBytes = rn_navi33::p6_boot::kStageBytes;
+                stageInput.dmaMappingRetained = dmaOwner.ownerVerified;
+                stageInput.dmaPagesVerified = dmaOwner.ownerVerified;
+                stageInput.dmaBytes = navi33FwPriBytes;
+                const auto stage = rn_navi33::p6_staging::validate(stageInput);
+                const char *const stn[] = {
+                    "error", "p6_ready", "firmware_metadata_verified",
+                    "firmware_digest_trusted", "gart_owner", "dma_owner",
+                    "fw_pri_lo", "fw_pri_hi", "stage_bytes",
+                    "may_copy_firmware", "may_issue_psp_commands"
+                };
+                const uint32_t stv[] = {
+                    static_cast<uint32_t>(stage.error),
+                    static_cast<uint32_t>(stageInput.p6PreflightPassed),
+                    static_cast<uint32_t>(stageInput.firmwareMetadataVerified),
+                    static_cast<uint32_t>(stageInput.firmwareBytesVerified),
+                    static_cast<uint32_t>(stageInput.gartOwnershipVerified),
+                    static_cast<uint32_t>(dmaOwner.ownerVerified),
+                    static_cast<uint32_t>(stage.fwPriGpuVa),
+                    static_cast<uint32_t>(stage.fwPriGpuVa >> 32),
+                    static_cast<uint32_t>(stageInput.fwPriBytes),
+                    static_cast<uint32_t>(stage.mayCopyFirmware),
+                    static_cast<uint32_t>(stage.mayIssuePspCommands)
+                };
+                rnPublish(this, "navi33-p6-staging", stn, stv,
+                          sizeof(stv) / sizeof(stv[0]));
+
                 // Linux GC11.0.2 boot-parity preflight. This is a read-only
                 // status report; it does not substitute for a real PSP,
                 // GMC11 or MES KIQ/Scheduler hardware initialization.
@@ -3957,6 +4527,14 @@ void RedNaviProbe::stop(IOService *provider) {
     if (doorbellKeep) { rn_set_doorbell(nullptr, 0); doorbellKeep->release(); doorbellKeep = nullptr; }
     if (!retainDma && hostDma) { hostDma->complete(); hostDma->clearMemoryDescriptor(); hostDma->release(); hostDma = nullptr; }
     if (!retainDma && hostBuf) { hostBuf->release(); hostBuf = nullptr; }
+    // P6.4 never exposes fw_pri to the GPU, so its DMA mapping is always safe
+    // to tear down with the service regardless of the legacy gpuLive state.
+    releaseNavi33FwPriDma();
+    // P6.5 is bookkeeping only; dropping the claim performs no hardware I/O.
+    navi33VramLedgerOwned = false;
+    navi33VramPtOffset = 0;
+    navi33VramScratchOffset = 0;
+    navi33VramDummyOffset = 0;
     if (regs) { regs->release(); regs = nullptr; }
     IOService::stop(provider);
 }

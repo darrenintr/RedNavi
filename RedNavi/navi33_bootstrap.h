@@ -9,6 +9,16 @@
 
 namespace rn_navi33 {
 
+// RX 7600 (Navi33) reports MMHUB IP 3.0.2, whose register layout is NOT
+// identical to Navi32's MMHUB 3.0.0. All offsets are DWORDs relative to
+// MMHUB segment 0 from the device's validated IP Discovery table.
+// Source: Linux asic_reg/mmhub/mmhub_3_0_2_offset.h.
+namespace mmhub_v3_0_2 {
+constexpr uint32_t kFbLocationBaseDword = 0x086cu;
+constexpr uint32_t kFbLocationTopDword  = 0x086du;
+constexpr uint32_t kFbOffsetDword       = 0x0857u;
+} // namespace mmhub_v3_0_2
+
 enum class MemoryError : uint8_t {
     Ok, NoVram, BadLocation, WindowTooSmall, InvalidBar
 };
@@ -16,8 +26,9 @@ struct MemoryWindow {
     MemoryError error = MemoryError::NoVram;
     uint64_t fbStart = 0;
     uint64_t fbEnd = 0; // inclusive
-    uint64_t fbBytes = 0;
-    uint64_t vramBytes = 0;
+    uint64_t locationBytes = 0; // raw MMHUB FB_LOCATION span
+    uint64_t fbBytes = 0;       // conservative usable span
+    uint64_t vramBytes = 0;     // NBIO/RCC_CONFIG_MEMSIZE
     uint64_t cpuVisibleBytes = 0;
     uint32_t fbOffsetRegister = 0; // keep raw; FB_OFFSET is not a VRAM allocation address
     bool valid() const { return error == MemoryError::Ok; }
@@ -36,22 +47,31 @@ inline MemoryWindow makeMemoryWindow(uint32_t fbBase, uint32_t fbTop,
     }
     const uint64_t units = static_cast<uint64_t>(fbTop) - fbBase + 1u;
     out.fbStart = static_cast<uint64_t>(fbBase) * kFbUnit;
-    out.fbBytes = units * kFbUnit;
-    out.fbEnd = out.fbStart + out.fbBytes - 1u;
-    // Navi33 Linux reference: physical VRAM/BAR0 = 8192 MiB, but the
-    // reported accessible FB range can be 8176 MiB after a 16 MiB tail
-    // reservation. Do not reject a full-size Resizable BAR for this.
-    // Keep the allowed difference tight until another real ASIC capture
-    // establishes whether larger reservations occur.
+    out.locationBytes = units * kFbUnit;
+
+    // Linux GMC11 uses NBIO get_memsize() (RCC_CONFIG_MEMSIZE) as
+    // mc_vram_size and uses MMHUB get_fb_location() for the base address.
+    // Real Navi33 captures show the two size observations can differ by one
+    // 16 MiB unit in either direction:
+    //   Linux:  FB_LOCATION span 8176 MiB, memsize/BAR0 8192 MiB
+    //   macOS:  FB_LOCATION span 8192 MiB, memsize 8176 MiB, BAR0 256 MiB
+    // Treat that one-unit disagreement as a reserved edge, but never expose
+    // more usable VRAM than both independent observations agree on.
     constexpr uint64_t kMaxNavi33ReservedTail = 16ull << 20;
-    if (out.fbBytes > out.vramBytes ||
-        out.vramBytes - out.fbBytes > kMaxNavi33ReservedTail) {
+    const uint64_t larger = out.locationBytes > out.vramBytes ?
+        out.locationBytes : out.vramBytes;
+    const uint64_t smaller = out.locationBytes < out.vramBytes ?
+        out.locationBytes : out.vramBytes;
+    if (larger - smaller > kMaxNavi33ReservedTail) {
         out.error = MemoryError::WindowTooSmall;
         return out;
     }
-    // BAR0 is a CPU aperture; it may cover physical VRAM including the
-    // reserved tail. The usable CPU-visible range must exclude that tail.
-    if (bar0Bytes < 4096u || bar0Bytes > out.vramBytes) {
+    out.fbBytes = smaller;
+    out.fbEnd = out.fbStart + out.fbBytes - 1u;
+
+    // BAR0 is a CPU aperture and may include the same 16 MiB reserved edge.
+    // The usable CPU-visible span is still clipped to conservative fbBytes.
+    if (bar0Bytes < 4096u || bar0Bytes > larger) {
         out.error = MemoryError::InvalidBar;
         return out;
     }

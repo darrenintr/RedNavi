@@ -92,6 +92,11 @@ static void dmaTests() {
     assert(hostDmaAddress(d,0,4096).error==Error::NoDmaMapping);
 }
 static void barTests() {
+    // RX7600 real macOS Sequoia 15.8.2: BAR2 is 2 MiB, not Linux's 256 MiB.
+    // The same MES doorbell DWORD offsets remain inside both apertures.
+    assert(doorbellBarOffset(0x116u, 2ull << 20).ok());
+    assert(doorbellBarOffset(0x116u, 256ull << 20).ok());
+    assert(doorbellBarOffset(0x80000u, 2ull << 20).error == Error::BadBar);
     auto gc=gcRegisterBarOffset(0x1260,0x1688,0x100000);
     assert(gc.ok() && gc.address.value==uint64_t(0x1260+0x1688)*4u);
     assert(gcRegisterBarOffset(0xffffffffu,0xffffffffu,0x100000).error==Error::BadBar);
