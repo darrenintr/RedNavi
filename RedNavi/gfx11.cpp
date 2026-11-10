@@ -102,6 +102,17 @@ static int flushVmids(struct rn_device *adev, u32 mask) {
     return rc;
 }
 
+void rn_gart_prepare_invalidation(struct rn_device *adev) {
+    // Linux gfxhub_v3_0_program_invalidation() programs all 18 engines.
+    // RedNavi currently reserves engine 17 for register-driven VM flushes,
+    // so at minimum initialize that engine's full 48-bit address range
+    // before its first request.
+    WREG32_SOC15(RN_GC, 0, regGCVM_INVALIDATE_ENG17_ADDR_RANGE_LO32,
+                 0xffffffffu);
+    WREG32_SOC15(RN_GC, 0, regGCVM_INVALIDATE_ENG17_ADDR_RANGE_HI32,
+                 0x1fu);
+}
+
 int rn_gart_flush(struct rn_device *adev) { return flushVmids(adev, 1); }
 
 int rn_gart_update_page(struct rn_device *adev, const struct rn_gmc *gmc, u32 page, u64 bus) {
