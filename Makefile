@@ -175,5 +175,8 @@ test:
 	clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p6_staging_test.cpp -o build/navi33_p6_staging_test
 	./build/navi33_p6_staging_test
 	python3 -m unittest discover -s tests/host -p 'navi33_p6_firmware_audit_test.py'
+	clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_crossdriver_test.cpp -o build/navi33_crossdriver_test
+	./build/navi33_crossdriver_test
+	python3 -m unittest discover -s tests/host -p 'navi33_ioaccel_abi_audit_test.py'
 
 .PHONY: all clean test mtl
