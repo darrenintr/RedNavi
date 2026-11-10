@@ -5194,6 +5194,11 @@ bool RedNaviProbe::start(IOService *provider) {
 #endif
 #endif
 
+                const uint64_t p73StageGpuVa =
+                    gartPlan.gartStart +
+                    static_cast<uint64_t>(
+                        rn_navi33::p7_pmfw::kStageFirstPage) * 4096ull;
+
                 rn_navi33::p7_pmfw::Input p73Input{};
                 p73Input.requested = p7StepArg >= 5u;
                 p73Input.pspReady =
@@ -5206,10 +5211,16 @@ bool RedNaviProbe::start(IOService *provider) {
                     p73PmfwMetadataVerified;
                 p73Input.digestTrusted = p73PmfwDigestTrusted;
                 p73Input.firmwareBytes = p73PmfwBytes;
-                p73Input.stageBytes = navi33FwPriBytes;
+                p73Input.stageBytes =
+                    rn_navi33::p7_pmfw::alignPage(p73PmfwBytes);
                 const auto p73Gate =
                     rn_navi33::p7_pmfw::inspect(p73Input);
 
+                uint32_t p73MappingError = 0;
+                bool p73StagePrepared = false;
+                bool p73StageMapped = false;
+                bool p73StagePteVerified = false;
+                uint32_t p73BadPte = 0xffffffffu;
                 bool p73FenceOk = false;
                 bool p73PmfwAccepted = false;
                 uint32_t p73Status = 0xffffffffu;
@@ -5220,39 +5231,70 @@ bool RedNaviProbe::start(IOService *provider) {
 
 #if defined(RN_HAVE_SMU_FW)
                 if (p73Gate.mayLoadPmfw &&
-                    navi33FwPriBuf &&
-                    navi33FwPriBuf->getBytesNoCopy()) {
-                    uint8_t *const fwPri = static_cast<uint8_t *>(
-                        navi33FwPriBuf->getBytesNoCopy());
-                    memset(fwPri, 0, navi33FwPriBytes);
-                    memcpy(fwPri, kRNSmuFw, kRNSmuFwSize);
-                    OSSynchronizeIO();
+                    prepareNavi33PmfwDma(
+                        kRNSmuFwSize, &p73MappingError)) {
+                    p73StagePrepared = true;
 
-                    const uint32_t pmfwArgs[4] = {
-                        static_cast<uint32_t>(
-                            gartPlan.fwPriGpuAddress),
-                        static_cast<uint32_t>(
-                            gartPlan.fwPriGpuAddress >> 32),
-                        static_cast<uint32_t>(kRNSmuFwSize),
-                        kRNPspFwTypeSmu
-                    };
-                    uint32_t pmfwResp[4] = {};
-                    p73FenceOk = pspSubmitP7(
-                        p71RingGpuVa, p71CmdGpuVa, p71FenceGpuVa,
-                        kRNPspCmdLoadIpFw, pmfwArgs, 4,
-                        pmfwResp, 4);
-                    p73Status = pmfwResp[0];
-                    p73FwAddrLo = pmfwResp[2];
-                    p73FwAddrHi = pmfwResp[3];
-                    p73PmfwAccepted =
-                        p73FenceOk && p73Status == 0;
+                    bool ptesOk = true;
+                    for (uint32_t p = 0;
+                         p < navi33PmfwPageCount; ++p) {
+                        const uint32_t index =
+                            rn_navi33::p7_pmfw::kStageFirstPage + p;
+                        rn_gart_map_page(
+                            &gpu, &p7Gmc, index,
+                            navi33PmfwPages[p]);
+                        const uint64_t got =
+                            rn_gart_read_pte(&gpu, &p7Gmc, index);
+                        const uint64_t expected =
+                            rn_system_pte(navi33PmfwPages[p]);
+                        if (got != expected) {
+                            ptesOk = false;
+                            p73BadPte = index;
+                            break;
+                        }
+                    }
+                    p73StagePteVerified = ptesOk;
 
-                    // Read-only observation.  Do not send any SMU mailbox
-                    // message at Step 5.
-                    uint32_t mp1Base = 0;
-                    if (ipBase(kRNHwIdMp1, &mp1Base)) {
-                        p73SmuRespAfter =
-                            rd((mp1Base + 0x29au) * 4);
+                    if (ptesOk) {
+                        rn_mmhub_prepare_invalidation(&gpu);
+                        p73StageMapped =
+                            rn_mmhub_gart_flush(&gpu) == 0;
+                    }
+                    if (p73StageMapped) {
+                        navi33PmfwMapped = true;
+                        uint8_t *const stage =
+                            static_cast<uint8_t *>(
+                                navi33PmfwBuf->getBytesNoCopy());
+                        memset(stage, 0, navi33PmfwStageBytes);
+                        memcpy(stage, kRNSmuFw, kRNSmuFwSize);
+                        OSSynchronizeIO();
+
+                        const uint32_t pmfwArgs[4] = {
+                            static_cast<uint32_t>(p73StageGpuVa),
+                            static_cast<uint32_t>(
+                                p73StageGpuVa >> 32),
+                            static_cast<uint32_t>(kRNSmuFwSize),
+                            kRNPspFwTypeSmu
+                        };
+                        uint32_t pmfwResp[4] = {};
+                        p73FenceOk = pspSubmitP7(
+                            p71RingGpuVa, p71CmdGpuVa,
+                            p71FenceGpuVa,
+                            kRNPspCmdLoadIpFw, pmfwArgs, 4,
+                            pmfwResp, 4);
+                        p73Status = pmfwResp[0];
+                        p73FwAddrLo = pmfwResp[2];
+                        p73FwAddrHi = pmfwResp[3];
+                        p73PmfwAccepted =
+                            p73FenceOk && p73Status == 0;
+
+                        // Read-only observation. Do not send an SMU mailbox
+                        // message at Step 5.
+                        uint32_t mp1Base = 0;
+                        if (ipBase(kRNHwIdMp1, &mp1Base)) {
+                            p73SmuRespAfter =
+                                rd((mp1Base + 0x29au) * 4);
+                        }
                     }
                 }
 #endif
@@ -5262,7 +5304,14 @@ bool RedNaviProbe::start(IOService *provider) {
                     "toc_accepted", "tmr_ownership_verified",
                     "firmware_present", "metadata_verified",
                     "digest_trusted", "firmware_version",
-                    "firmware_bytes", "stage_va_lo", "stage_va_hi",
+                    "firmware_bytes",
+                    "stage_prepared", "stage_mapped",
+                    "stage_page_count", "stage_pte_verified",
+                    "stage_bad_pte", "stage_mapping_error",
+                    "stage_va_lo", "stage_va_hi",
+                    "submit_wptr_before", "submit_wptr_after",
+                    "fence_expected", "fence_observed",
+                    "fence_polls", "fence_timeout_ms",
                     "fence_ok", "status", "fw_addr_lo", "fw_addr_hi",
                     "accepted", "smu_response_before",
                     "smu_response_after", "may_setup_tmr"
@@ -5280,10 +5329,17 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(
                         p73PmfwDigestTrusted),
                     p73PmfwVersion, p73PmfwBytes,
-                    static_cast<uint32_t>(
-                        gartPlan.fwPriGpuAddress),
-                    static_cast<uint32_t>(
-                        gartPlan.fwPriGpuAddress >> 32),
+                    static_cast<uint32_t>(p73StagePrepared),
+                    static_cast<uint32_t>(p73StageMapped),
+                    navi33PmfwPageCount,
+                    static_cast<uint32_t>(p73StagePteVerified),
+                    p73BadPte, p73MappingError,
+                    static_cast<uint32_t>(p73StageGpuVa),
+                    static_cast<uint32_t>(p73StageGpuVa >> 32),
+                    p7SubmitWptrBefore, p7SubmitWptrAfter,
+                    p7SubmitFenceExpected, p7SubmitFenceObserved,
+                    p7SubmitPolls,
+                    rn_navi33::p7_pmfw::kFenceTimeoutMs,
                     static_cast<uint32_t>(p73FenceOk),
                     p73Status, p73FwAddrLo, p73FwAddrHi,
                     static_cast<uint32_t>(p73PmfwAccepted),
