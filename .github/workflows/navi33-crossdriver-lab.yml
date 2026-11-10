@@ -1,0 +1,37 @@
+name: Navi33 cross-driver host lab
+
+on:
+  push:
+    branches:
+      - feature/navi33-crossdriver-lab
+  pull_request:
+    paths:
+      - 'RedNavi/navi33_stage_gate.h'
+      - 'RedNavi/navi33_topology_wire.h'
+      - 'tests/host/navi33_crossdriver_test.cpp'
+      - 'tests/host/navi33_ioaccel_abi_audit_test.py'
+      - 'tools/navi33_ioaccel_abi_audit.py'
+      - '.github/workflows/navi33-crossdriver-lab.yml'
+      - 'Makefile'
+
+jobs:
+  host-lab:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stage and topology tests (GCC and Clang, sanitizers)
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p build
+          for cxx in g++ clang++; do
+            "$cxx" -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic \
+              -fsanitize=address,undefined -fno-omit-frame-pointer \
+              -IRedNavi tests/host/navi33_crossdriver_test.cpp \
+              -o build/navi33_crossdriver_san
+            ./build/navi33_crossdriver_san
+          done
+      - name: ABI model structural audit tests (synthetic only)
+        run: python3 -m unittest discover -s tests/host -p 'navi33_ioaccel_abi_audit_test.py' -v
+      - name: Existing RedNavi host regressions
+        run: make test
