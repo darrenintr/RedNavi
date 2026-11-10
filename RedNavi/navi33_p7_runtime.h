@@ -8,12 +8,14 @@
 // step 0: observation only
 // step 1: install the already-owned VMID0/GART mapping
 // step 2: additionally allow the verified PSP13.0.7 boot chain
-// step 3: queue/render bring-up, but only after sOS is observed alive
+// step 3: PSP KM/GPCOM ring + LOAD_TOC after sOS is alive
+// step 4: software-only TMR ownership checkpoint
+// step 5: PMFW-only LOAD_IP_FW checkpoint; SETUP_TMR remains blocked
 #include <stdint.h>
 
 namespace rn_navi33 { namespace p7_runtime {
 
-constexpr uint32_t kMaxExecutionStep = 4u;
+constexpr uint32_t kMaxExecutionStep = 5u;
 
 constexpr uint32_t sanitizeStep(uint32_t raw) {
     return raw <= kMaxExecutionStep ? raw : 0u;
