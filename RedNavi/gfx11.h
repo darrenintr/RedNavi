@@ -105,6 +105,7 @@ void rn_gart_map_vram_page(struct rn_device *adev, const struct rn_gmc *gmc, u32
 // Linux reserves for the GART (gmc_v11_0_flush_vm_hub). Returns 0 once the engine acknowledges, -1 on timeout.
 int rn_gart_update_page(struct rn_device *adev, const struct rn_gmc *gmc, u32 page, u64 bus_addr);
 int rn_gart_flush(struct rn_device *adev);
+void rn_gart_prepare_invalidation(struct rn_device *adev); // program engine 17 full-range invalidation window before first VMID0 flush
 
 // Runs a packet list on SDMA0's gfx ring (the setup of rn_sdma0_test, reprogrammed) and waits for the read pointer to reach its end.
 // Addresses inside the packets are whatever the SDMA can translate: MC addresses in the VRAM aperture, or GART addresses.
