@@ -19,6 +19,13 @@ static Input ready(uint32_t step) {
 
 int main() {
     {
+        assert(sanitizeStep(0) == 0u);
+        assert(sanitizeStep(1) == 1u);
+        assert(sanitizeStep(3) == 3u);
+        assert(sanitizeStep(4) == 4u);
+        assert(sanitizeStep(5) == 0u);
+    }
+    {
         auto r = inspect(Input{});
         assert(r.error == Error::Disabled);
         assert(!r.mayProgramGart);
@@ -53,6 +60,17 @@ int main() {
         in.secureOsAlive = true;
         r = inspect(in);
         assert(r.error == Error::Ok);
+        assert(r.mayStartQueues);
+    }
+    {
+        auto in = ready(4);
+        auto r = inspect(in);
+        assert(r.error == Error::SecureOsNotAlive);
+        in.secureOsAlive = true;
+        r = inspect(in);
+        assert(r.error == Error::Ok);
+        assert(r.mayProgramGart);
+        assert(r.mayIssuePspBootloader);
         assert(r.mayStartQueues);
     }
     {
