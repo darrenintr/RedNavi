@@ -244,6 +244,7 @@ test:
 	python3 -m unittest discover -s tests/host -p 'navi33_pci_resources_test.py'
 	python3 -m unittest discover -s tests/host -p 'navi33_diag_isolation_test.py'
 	python3 -m unittest discover -s tests/host -p 'navi33_p6_firmware_audit_test.py'
+	python3 -m unittest discover -s tests/host -p 'navi33_p6_firmware_generator_test.py'
 
 # Exercise optional firmware call sites without embedding or linking any firmware.
 # The declaration-only fixture is visible exclusively to this syntax check.
