@@ -301,9 +301,9 @@ P6.1 then advanced exactly one fail-closed state:
 `31` with blocker `5 (NoVerifiedGpuOwner)`. No PSP/GART/MES
 hardware write was enabled.
 
-### P6.2/P6.3 firmware, GART and ownership preflight
+### P6.2/P6.3/P6.4 firmware, GART and ownership preflight
 
-P4 `0.0.5` adds **read-only policy layers**, not a PSP/GART loader.
+P4 `0.0.5` added **read-only policy layers**, not a PSP/GART loader.
 A locally generated `RedNavi/psp_fw.h` must come from the exact
 `psp_13_0_7_sos.bin` target, carry source SHA-256 metadata, match the
 currently inspected 248496-byte container, contain SYS_DRV and SOS, and
@@ -335,6 +335,37 @@ programming, TLB flush, firmware copy or PSP command occurs in P4 0.0.5.
 The legacy fixed offsets such as `0x0C100000` and GART
 `0x2000000000` are not accepted as Navi33 ownership proof.
 
+#### Native P4 0.0.5 checkpoint (2026-11-10)
+
+The same bare-metal RX7600 passed the planned P6.3 checkpoint exactly:
+`navi33-memory-preflight.preflight_error=0`,
+`navi33-address-space-audit.error=0`, usable VRAM 8176 MiB and
+CPU-visible VRAM 256 MiB. P6.1 remained
+`status=8 (NeedsVerifiedFirmware)`, IFWI ready, sOS not alive and no
+PSP command permission.
+
+The GART planner produced
+`0x7fff00000000..0x7fff1fffffff`, 512 MiB, with a 1048576-byte
+VMID0 PTE table. It stopped at `error=4 (NoVramOwnership)` and
+`may_program_gart=0`. With no local PSP header, firmware metadata
+stopped at `error=1` and staging at
+`error=2 (NoFirmwareProof)`. This confirms the address model without
+installing any PTE or changing GFXHUB/MMHUB.
+
+#### P6.4 ownership-only DMA probe
+
+P4 `0.0.6` adds the exact next layer behind a new explicit boot arg:
+`rednavi_navi33_dma_owner_probe=1`. When P5/P6.1 are already valid,
+the Kext allocates one 1 MiB `IOBufferMemoryDescriptor`, retains an
+`IODMACommand`, enumerates all 256 4 KiB I/O pages through the existing
+44-bit GMC11 validator, and publishes `navi33-fw-pri-dma-owner`.
+
+This still does **not** install those IOVAs into GPU GART, reserve VRAM
+for the VMID0 page table, write any PTE, program GFXHUB/MMHUB, flush a
+GPU TLB, copy PSP firmware or issue a PSP command. The ownership-only
+DMA mapping is released on service stop because P4 0.0.6 never exposes
+it to the GPU.
+
 Do not add the P4 bundle to the known-good OpenCore EFI. Use only a
 separate, recoverable **test EFI**, and keep the clean boot path
 available. Never co-install the normal RedNavi and P4 bundles; both
@@ -344,21 +375,21 @@ before taking this risk.
 
 ### Next verified hardware checkpoint
 
-Build P4 0.0.5 **without** a local PSP header first. Expected native
-results are `navi33-p6-boot-firmware.error=1 (WrongTarget/no local
-metadata)`, `navi33-p6-staging.error=2 (NoFirmwareProof)`, and
-`navi33-gart-owner-plan.error=4 (NoVramOwnership)` while still
-publishing GART `0x7fff00000000..0x7fff1fffffff` and a 1 MiB PTE table.
+Build P4 0.0.6 without a local PSP header and add only
+`rednavi_navi33_dma_owner_probe=1` to the isolated test EFI.
 
-Then generate a local header from the exact PSP13.0.7 SOS image and
-rebuild the isolated USB Kext. Firmware **metadata** may advance to
-`navi33-p6-boot-firmware.error=0`, but `firmware_digest_trusted`
-remains 0 and P6 staging deliberately stays at
-`error=2 (NoFirmwareProof)` until an independently sourced expected
-SHA-256 is pinned and compared. In parallel the separate GART report
-remains `error=4 (NoVramOwnership)`. Only after both proof chains are
-closed should RedNavi add a retained IOKit DMA owner + explicit VRAM
-page-table reservation and later enable GMC11 writes. MES remains later. The historical Cobalt64
+Expected result: `navi33-fw-pri-dma-owner.error=0`,
+`bytes=1048576`, `page_count=256`, `address_bits=44`,
+`owner_verified=1`, but `gpu_mapped=0` and
+`may_install_gart_ptes=0`. The independent GART planner should retain
+the same Linux-high geometry and still stop at
+`error=4 (NoVramOwnership)`, while now reporting `dma_owner=1`.
+P6 staging remains `NoFirmwareProof`.
+
+Only after that native checkpoint should RedNavi implement the other
+half of P6.4: an explicit VRAM reservation ledger for the 1 MiB VMID0
+PTE table plus scratch/dummy pages. Actual GMC11/GART writes remain a
+later opt-in stage. MES remains later. The historical Cobalt64
 compute proof was in a specific RX7600 GPU-passthrough environment;
 its absolute GPU VM/VRAM ownership must be revalidated on bare-metal
 Sequoia.
