@@ -5031,6 +5031,35 @@ bool RedNaviProbe::start(IOService *provider) {
                 p7Input.secureOsAlive = p7SosAfter != 0;
                 const auto p7AfterPsp =
                     rn_navi33::p7_runtime::inspect(p7Input);
+                // P7.3 metadata and PMFW staging ownership are prepared
+                // before the PSP GPCOM ring is created. Linux constructs
+                // firmware.fw_buf before PSP hw_init and does not mutate the
+                // active VMID0 mapping between LOAD_TOC and LOAD_IP_FW.
+                bool p73PmfwPresent = false;
+                bool p73PmfwMetadataVerified = false;
+                bool p73PmfwDigestTrusted = false;
+                uint32_t p73PmfwVersion = 0;
+                uint32_t p73PmfwBytes = 0;
+#if defined(RN_HAVE_SMU_FW)
+                p73PmfwPresent = true;
+#if defined(RN_SMU_FW_METADATA_V1)
+                p73PmfwMetadataVerified = true;
+                p73PmfwDigestTrusted =
+                    RN_SMU_FW_DIGEST_TRUSTED == 1;
+                p73PmfwVersion = kRNSmuFwVersion;
+                p73PmfwBytes = kRNSmuFwSize;
+#endif
+#endif
+                const uint64_t p73StageGpuVa =
+                    gartPlan.gartStart +
+                    static_cast<uint64_t>(
+                        rn_navi33::p7_pmfw::kStageFirstPage) * 4096ull;
+                uint32_t p73MappingError = 0;
+                bool p73StagePrepared = false;
+                bool p73StageMapped = false;
+                bool p73StagePteVerified = false;
+                uint32_t p73BadPte = 0xffffffffu;
+
                 uint32_t p71MappingError = 0;
                 bool p71RuntimeMapped = false;
                 bool p71RingCreated = false;
@@ -5073,10 +5102,54 @@ bool RedNaviProbe::start(IOService *provider) {
                             break;
                         }
                     }
+                    // Step 5 pre-stages PMFW into the same VMID0 page
+                    // table before the GPCOM ring is created. After this one
+                    // invalidate, the ring lifetime does not modify GART.
+#if defined(RN_HAVE_SMU_FW)
+                    if (ptesOk && p7StepArg >= 5u &&
+                        p73PmfwPresent &&
+                        p73PmfwMetadataVerified &&
+                        p73PmfwDigestTrusted &&
+                        prepareNavi33PmfwDma(
+                            kRNSmuFwSize, &p73MappingError)) {
+                        p73StagePrepared = true;
+                        uint8_t *const stage =
+                            static_cast<uint8_t *>(
+                                navi33PmfwBuf->getBytesNoCopy());
+                        memset(stage, 0, navi33PmfwStageBytes);
+                        memcpy(stage, kRNSmuFw, kRNSmuFwSize);
+                        OSSynchronizeIO();
+
+                        bool stagePtesOk = true;
+                        for (uint32_t p = 0;
+                             p < navi33PmfwPageCount; ++p) {
+                            const uint32_t index =
+                                rn_navi33::p7_pmfw::kStageFirstPage + p;
+                            rn_gart_map_page(
+                                &gpu, &p7Gmc, index,
+                                navi33PmfwPages[p]);
+                            const uint64_t got =
+                                rn_gart_read_pte(&gpu, &p7Gmc, index);
+                            const uint64_t expected =
+                                rn_system_pte(navi33PmfwPages[p]);
+                            if (got != expected) {
+                                stagePtesOk = false;
+                                p73BadPte = index;
+                                break;
+                            }
+                        }
+                        p73StagePteVerified = stagePtesOk;
+                    }
+#endif
                     if (ptesOk) {
                         rn_mmhub_prepare_invalidation(&gpu);
-                        p71RuntimeMapped = rn_mmhub_gart_flush(&gpu) == 0;
+                        p71RuntimeMapped =
+                            rn_mmhub_gart_flush(&gpu) == 0;
+                        if (p73StagePteVerified)
+                            p73StageMapped = p71RuntimeMapped;
                     }
+                    if (p73StageMapped)
+                        navi33PmfwMapped = true;
                     if (p71RuntimeMapped) {
                         navi33PspRuntimeMapped = true;
                         p71RingCreated = createPspRingP7(p71RingGpuVa);
