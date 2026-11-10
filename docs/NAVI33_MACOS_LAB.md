@@ -384,7 +384,7 @@ before taking this risk.
 
 #### P6.4b boot-framebuffer reservation evidence
 
-P4 `0.0.7` adds a read-only bridge to XNU's `PE_current_console()`.
+P4 `0.0.7` added a read-only bridge to XNU's `PE_current_console()`.
 It records the current boot framebuffer CPU physical address, BAR0 CPU
 physical base, row bytes, mode dimensions and translated VRAM aperture
 offset. The planner mirrors IONDRVFramebuffer's active-aperture size
@@ -397,23 +397,36 @@ if the active boot framebuffer lies inside BAR0 and does not overlap any
 of those three ranges. `reservation_owned` and `may_write_vram`
 remain hard false.
 
+Native P4 `0.0.7` exposed one x86 IONDRV encoding detail: the reported
+console address was `0x830000001` while BAR0 physical base was
+`0x830000000`. Apple IONDRV interprets bit 0 as the marker that
+`csBaseAddr` is already a physical framebuffer address, then computes
+the real physical address with the low marker bit removed. Therefore the
+actual framebuffer begins at BAR0/VRAM offset 0, not byte 1.
+
+P4 `0.0.8` fixes only this evidence decoding. It publishes both the raw
+encoded address and the decoded physical address. No reservation state,
+VRAM write permission, GART PTE or hardware programming changes in this
+version.
+
 ### Next verified hardware checkpoint
 
-Build P4 0.0.7 with the same
+Build P4 0.0.8 with the same
 `rednavi_navi33_dma_owner_probe=1` opt-in. Collect
 `navi33-boot-framebuffer`, `navi33-vram-reservation-candidate`,
 `navi33-fw-pri-dma-owner` and `navi33-gart-owner-plan`.
 
-Expected: the DMA owner remains verified, the current boot framebuffer
-maps cleanly inside BAR0, and the candidate reports
-`candidate_nonoverlap=1` while `reservation_owned=0`,
-`may_write_vram=0`, GART `vram_owner=0`, and
-`may_program_gart=0`.
+Expected on the same machine:
+`console_raw=0x830000001`, decoded
+`console_phys=0x830000000`, `physical_encoded=1`,
+`console_offset=0`, framebuffer bytes 8294528, and
+`candidate_nonoverlap=1`. Ownership and all hardware-write permissions
+must remain zero.
 
-Only after that native evidence should a later explicit stage claim the
-candidate in RedNavi's own reservation ledger. Actual PTE writes,
-GFXHUB/MMHUB programming and PSP commands remain disabled. MES remains
-later. The historical Cobalt64
+Only after that corrected native evidence should a later explicit stage
+claim the candidate in RedNavi's own reservation ledger. Actual PTE
+writes, GFXHUB/MMHUB programming and PSP commands remain disabled.
+MES remains later. The historical Cobalt64
 compute proof was in a specific RX7600 GPU-passthrough environment;
 its absolute GPU VM/VRAM ownership must be revalidated on bare-metal
 Sequoia.
