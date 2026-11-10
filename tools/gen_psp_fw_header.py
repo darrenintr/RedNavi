@@ -4,15 +4,18 @@
 For Navi33 P6.2 use the exact upstream Linux firmware file:
 
     python3 tools/gen_psp_fw_header.py \
-        /path/to/psp_13_0_7_sos.bin RedNavi/psp_fw.h
+        /path/to/psp_13_0_7_sos.bin RedNavi/psp_fw.h \
+        --expected-sha256 <digest-from-an-independent-linux-firmware-source>
 
 The generated header contains the bootloader-loadable components plus source
 metadata (target IP, source size/SHA-256, component mask, largest component).
-The hash is a reproducibility record of the supplied file; provenance still
-has to be established externally. The kernel-side P6 gates remain fail-closed.
+The firmware is marked trusted only when an independently supplied expected
+SHA-256 exactly matches the input bytes. Omitting the expected digest keeps
+P7 hardware firmware loading fail-closed.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 from pathlib import Path
 import struct
@@ -109,15 +112,26 @@ def parse(path: Path):
 
 
 def main(argv=None):
-    argv = sys.argv[1:] if argv is None else argv
-    if len(argv) != 2:
-        raise SystemExit(__doc__)
-    path, out = map(Path, argv)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("path", type=Path)
+    parser.add_argument("out", type=Path)
+    parser.add_argument(
+        "--expected-sha256",
+        help="independently sourced SHA-256 required to mark firmware trusted",
+    )
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    path, out = args.path, args.out
     b, header_major, header_minor, found = parse(path)
 
     exact = path.name == TARGET_FILE
     target = TARGET if exact else (0, 0, 0)
     digest = hashlib.sha256(b).hexdigest()
+    expected = (args.expected_sha256 or "").strip().lower()
+    if expected and (len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected)):
+        raise SystemExit("--expected-sha256 must be exactly 64 lowercase/uppercase hex characters")
+    if expected and digest != expected:
+        raise SystemExit(f"firmware SHA-256 mismatch: actual {digest}, expected {expected}")
+    digest_trusted = bool(expected) and digest == expected
     mask = 0
     max_component = 0
     for name, (_ver, data) in found.items():
@@ -135,6 +149,7 @@ def main(argv=None):
         f.write(f"#define kRNPspComponentMask 0x{mask:08x}u\n")
         f.write(f"#define kRNPspMaxComponentBytes {max_component}u\n")
         f.write(f'static const char kRNPspSourceSha256[] = "{digest}";\n')
+        f.write(f"#define RN_PSP_FW_DIGEST_TRUSTED {1 if digest_trusted else 0}\n")
         f.write(f"#define kRNPspHeaderMajor {header_major}u\n")
         f.write(f"#define kRNPspHeaderMinor {header_minor}u\n")
 
@@ -166,6 +181,7 @@ def main(argv=None):
 
     print(f"source: {len(b)} bytes sha256={digest}")
     print(f"component mask=0x{mask:08x}, max={max_component} bytes")
+    print("digest trust: " + ("VERIFIED" if digest_trusted else "UNVERIFIED (P7 load stays disabled)"))
     if not exact:
         print(f"WARNING: expected {TARGET_FILE}; generated metadata will NOT pass Navi33 P6.2 target gate")
 
