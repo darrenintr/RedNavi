@@ -223,6 +223,8 @@ test:
 	./build/navi33_bootstrap_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p6_psp_test.cpp -o build/navi33_p6_psp_test
 	./build/navi33_p6_psp_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p6_psp_boot_plan_test.cpp -o build/navi33_p6_psp_boot_plan_test
+	./build/navi33_p6_psp_boot_plan_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p6_staging_test.cpp -o build/navi33_p6_staging_test
 	./build/navi33_p6_staging_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_linux_boot_parity_test.cpp -o build/navi33_linux_boot_parity_test
