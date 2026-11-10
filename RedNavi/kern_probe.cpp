@@ -696,6 +696,110 @@ bool RedNaviProbe::prepareNavi33PspRuntimeDma(uint32_t *mappingError) {
     return true;
 }
 
+void RedNaviProbe::releaseNavi33PmfwDma() {
+    if (navi33PmfwDma) {
+        navi33PmfwDma->clearMemoryDescriptor();
+        navi33PmfwDma->release();
+        navi33PmfwDma = nullptr;
+    }
+    if (navi33PmfwPages) {
+        IOFree(navi33PmfwPages,
+               sizeof(uint64_t) * navi33PmfwPageCount);
+        navi33PmfwPages = nullptr;
+    }
+    if (navi33PmfwBuf) {
+        navi33PmfwBuf->release();
+        navi33PmfwBuf = nullptr;
+    }
+    navi33PmfwPageCount = 0;
+    navi33PmfwStageBytes = 0;
+    navi33PmfwPrepared = false;
+}
+
+bool RedNaviProbe::prepareNavi33PmfwDma(
+    uint64_t bytes, uint32_t *mappingError) {
+    if (mappingError) *mappingError = 0;
+    const uint64_t stageBytes =
+        rn_navi33::p7_pmfw::alignPage(bytes);
+    const uint32_t pages =
+        rn_navi33::p7_pmfw::pageCount(bytes);
+
+    if (!bytes || !stageBytes || !pages ||
+        stageBytes > rn_navi33::p7_pmfw::kStageMaxBytes)
+        return false;
+
+    if (navi33PmfwPrepared && navi33PmfwBuf &&
+        navi33PmfwDma && navi33PmfwPages &&
+        navi33PmfwPageCount == pages &&
+        navi33PmfwStageBytes == stageBytes)
+        return true;
+
+    if (navi33PmfwMapped)
+        return false; // never replace backing while live PTEs exist
+
+    releaseNavi33PmfwDma();
+
+    navi33PmfwBuf = IOBufferMemoryDescriptor::inTaskWithOptions(
+        kernel_task, kIODirectionInOut, stageBytes, 4096);
+    if (!navi33PmfwBuf ||
+        !navi33PmfwBuf->getBytesNoCopy()) {
+        releaseNavi33PmfwDma();
+        return false;
+    }
+    memset(navi33PmfwBuf->getBytesNoCopy(), 0, stageBytes);
+
+    navi33PmfwDma = IODMACommand::withSpecification(
+        kIODMACommandOutputHost64,
+        rn_navi33::fw_pri_owner::kDmaAddressBits,
+        0, IODMACommand::kMapped,
+        stageBytes, 4096, nullptr, nullptr);
+    if (!navi33PmfwDma ||
+        navi33PmfwDma->setMemoryDescriptor(
+            navi33PmfwBuf) != kIOReturnSuccess) {
+        releaseNavi33PmfwDma();
+        return false;
+    }
+
+    navi33PmfwPages = static_cast<uint64_t *>(
+        IOMalloc(sizeof(uint64_t) * pages));
+    if (!navi33PmfwPages) {
+        releaseNavi33PmfwDma();
+        return false;
+    }
+    memset(navi33PmfwPages, 0, sizeof(uint64_t) * pages);
+
+    const auto mapping =
+        rn_dma::collectPages<IODMACommand::Segment64>(
+            navi33PmfwPages, pages, stageBytes,
+            [this](uint64_t *offset,
+                   IODMACommand::Segment64 *segments,
+                   uint32_t *count) {
+                UInt64 dmaOffset = *offset;
+                UInt32 dmaCount = *count;
+                const IOReturn rc =
+                    navi33PmfwDma->genIOVMSegments(
+                        &dmaOffset, segments, &dmaCount);
+                *offset = dmaOffset;
+                *count = dmaCount;
+                return rc == kIOReturnSuccess;
+            });
+
+    if (!mapping.ok() ||
+        mapping.pageCount != pages ||
+        mapping.bytes != stageBytes) {
+        if (mappingError)
+            *mappingError =
+                static_cast<uint32_t>(mapping.error);
+        releaseNavi33PmfwDma();
+        return false;
+    }
+
+    navi33PmfwPageCount = pages;
+    navi33PmfwStageBytes = stageBytes;
+    navi33PmfwPrepared = true;
+    return true;
+}
+
 bool RedNaviProbe::createPspRingP7(uint64_t ringGpuVa) {
     if (!navi33PspRuntimePrepared || !navi33PspRuntimeBuf)
         return false;
