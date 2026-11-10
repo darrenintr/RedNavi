@@ -43,8 +43,23 @@ int main() {
         i.fbBytes = 0x1ff000000ull;
         i.tmrMc = 0x81fc000000ull;
         auto r = inspect(i);
+        assert(r.error == Error::PmfwNotLoaded);
+        assert(r.mayLoadPmfw);
+        assert(!r.maySetupTmr);
+    }
+    {
+        auto i = base();
+        i.ringCreated = i.tocAccepted = true;
+        i.tmrBytes = 0x1300000ull;
+        i.tmrOwnershipVerified = true;
+        i.fbStart = 0x8000000000ull;
+        i.fbBytes = 0x1ff000000ull;
+        i.tmrMc = 0x800d100000ull;
+        i.pmfwLoaded = true;
+        auto r = inspect(i);
         assert(r.error == Error::TmrNotAccepted);
-        assert(r.maySetupTmr);
+        assert(r.mayLoadPmfw && r.maySetupTmr);
+        assert(!r.mayLoadIpFirmware);
     }
     {
         auto i = base();
@@ -54,12 +69,14 @@ int main() {
         i.fbStart = 0x8000000000ull;
         i.fbBytes = 0x1ff000000ull;
         i.tmrMc = 0x81fc000000ull;
-        i.gcFirmwareLoaded = i.sdmaFirmwareLoaded =
-            i.smuFirmwareLoaded = true;
+        i.pmfwLoaded = true;
+        i.gcFirmwareLoaded = i.sdmaFirmwareLoaded = true;
+        i.smuFirmwareLoaded = true;
         i.smuReady = true;
         i.mesSchedulerLoaded = i.mesKiqLoaded = true;
         auto r = inspect(i);
         assert(r.error == Error::Ok);
+        assert(r.mayLoadPmfw && r.maySetupTmr);
         assert(r.mayLoadIpFirmware && r.mayInitSmu);
         assert(r.mayStartMes && r.mayCreateGraphicsQueue);
     }

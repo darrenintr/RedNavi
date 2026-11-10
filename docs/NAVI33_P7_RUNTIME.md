@@ -63,8 +63,14 @@ Then add exactly one P7 execution level:
   `rednavi_navi33_p7_psp_limit=N` to cap the number of bootloader commands.
   This makes KDB/SPL/SYS/SOS independently observable before allowing the
   whole chain to reach C2PMSG_81.
-- `rednavi_navi33_p7_step=3`: currently only publishes render/queue admission
-  after sOS is alive. It deliberately does not start MES or a graphics queue.
+- `rednavi_navi33_p7_step=3`: after the verified PSP boot chain, map three
+  retained host-DMA pages for the PSP KM/GPCOM ring, command/response buffer
+  and fence, create the ring, submit LOAD_TOC, and record the PSP-calculated
+  TMR size. It stops before claiming or programming TMR.
+- `rednavi_navi33_p7_step=4`: P7.2 software-only TMR ownership checkpoint.
+  Reuse the P6.6 quiescent visible-VRAM carve and the LOAD_TOC size to claim a
+  naturally aligned TMR range. No PMFW, SETUP_TMR, IP firmware, SMU, MES or
+  graphics queue command is issued.
 
 Do not jump directly to step 2 or step 3 on a new build. Validate step 1 and
 capture its IORegistry state first.
@@ -194,6 +200,75 @@ sos_after != 0
 psp_ok = 1
 ```
 
+## Step-3 / Step-4 expected properties
+
+RX 7600 real hardware has now validated Step 3 with:
+
+```text
+runtime_dma_prepared = 1
+runtime_mapped = 1
+ring_created = 1
+toc_accepted = 1
+toc_status = 0
+tmr_bytes = 0x01300000
+post_gate_error = 8     # NoTmrOwnership, expected at Step 3
+```
+
+Step 4 remains software-only. For the validated 256 MiB visible aperture and
+P6.6 free range, the 19 MiB TMR planner should choose:
+
+```text
+tmr_bytes = 0x01300000
+offset    = 0x0d100000
+mc        = 0x800d100000
+pa        = 0x0d100000
+```
+
+The offset is both 1 MiB aligned and an exact multiple of the 19 MiB TMR size.
+It fits inside the already-audited RedNavi visible-VRAM tail, does not overlap
+the boot console or scratch/dummy/VMID0 page table reservation, and stays
+inside CPU-visible VRAM.
+
+The `pa` value follows Linux `amdgpu_gmc_vram_pa()` semantics:
+
+```text
+pa = tmr_mc - gmc.vram_start + vm_manager.vram_base_offset
+```
+
+On the validated card `MMMC_VM_FB_OFFSET == 0`, therefore `pa` is the VRAM
+offset `0x0d100000`. It is **not** `BAR0 CPU physical + offset`.
+
+A successful Step 4 should publish:
+
+```text
+navi33-p7-tmr-plan:
+  error = 0
+  requested = 1
+  toc_accepted = 1
+  carve_verified = 1
+  allocator_quiescent = 1
+  tmr_bytes = 19922944
+  offset = 0x0d100000
+  mc = 0x800d100000
+  pa = 0x0d100000
+  natural_aligned = 1
+  inside_visible_vram = 1
+  no_overlap = 1
+  ownership_verified = 1
+  may_write_vram = 0
+  may_issue_setup_tmr = 0
+
+navi33-p7-postpsp-runtime:
+  post_gate_error = 10     # PmfwNotLoaded
+  may_load_pmfw = 1
+  may_setup_tmr = 0
+  may_load_ip_fw = 0
+  may_start_mes = 0
+```
+
+This encodes Linux's PMFW-centralized C-state ordering: ownership first, then
+PMFW, then SETUP_TMR.
+
 ## Render-pipeline boundary
 
 For MP0 13.0.7, Linux marks PMFW centralized C-state management as enabled and
@@ -201,10 +276,11 @@ For MP0 13.0.7, Linux marks PMFW centralized C-state management as enabled and
 
 1. create the PSP GPCOM ring;
 2. LOAD_TOC to let PSP calculate the required TMR size;
-3. reserve the observed PSP TMR (same-card Linux capture: `0x1300000` bytes
-   from GPU MC `0x81fc000000`);
+3. claim an owned, naturally aligned TMR range; the validated RedNavi planner
+   uses the visible-VRAM tail rather than hard-coding Linux's allocator result;
 4. load SMU/PMFW through PSP **before** SETUP_TMR;
-5. SETUP_TMR;
+5. SETUP_TMR using MC and GPU-physical VRAM addresses derived from verified
+   FB_LOCATION / FB_OFFSET geometry;
 6. load the remaining GC/SDMA/MES/DMUB firmware through PSP;
 7. initialize SMU and the graphics blocks;
 8. bring up MES scheduler + KIQ;

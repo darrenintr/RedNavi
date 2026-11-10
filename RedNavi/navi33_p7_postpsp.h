@@ -26,6 +26,7 @@ enum class Error : uint8_t {
     BadTmrSize,
     NoTmrOwnership,
     TmrOutsideVram,
+    PmfwNotLoaded,
     TmrNotAccepted,
     IpFirmwareIncomplete,
     SmuNotReady,
@@ -50,6 +51,7 @@ struct Input {
     uint64_t tmrMc = 0;
     uint64_t fbStart = 0;
     uint64_t fbBytes = 0;
+    bool pmfwLoaded = false;
     bool tmrAccepted = false;
 
     bool gcFirmwareLoaded = false;
@@ -65,6 +67,7 @@ struct Report {
     bool mayMapRuntimePages = false;
     bool mayCreateRing = false;
     bool mayLoadToc = false;
+    bool mayLoadPmfw = false;
     bool maySetupTmr = false;
     bool mayLoadIpFirmware = false;
     bool mayInitSmu = false;
@@ -117,12 +120,16 @@ inline Report inspect(const Input &in) {
                     in.fbStart + in.fbBytes - 1u)) {
         r.error = Error::TmrOutsideVram; return r;
     }
+    // Linux psp_hw_start() for PMFW-centralized C-state management loads
+    // PMFW after TMR allocation/ownership exists but before SETUP_TMR.
+    r.mayLoadPmfw = true;
+    if (!in.pmfwLoaded) { r.error = Error::PmfwNotLoaded; return r; }
+
     r.maySetupTmr = true;
     if (!in.tmrAccepted) { r.error = Error::TmrNotAccepted; return r; }
 
     r.mayLoadIpFirmware = true;
-    if (!in.gcFirmwareLoaded || !in.sdmaFirmwareLoaded ||
-        !in.smuFirmwareLoaded) {
+    if (!in.gcFirmwareLoaded || !in.sdmaFirmwareLoaded) {
         r.error = Error::IpFirmwareIncomplete; return r;
     }
 
