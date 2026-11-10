@@ -263,4 +263,7 @@ test:
 check-kernel-firmware:
 	$(CXX) $(CXXFLAGS) -DRN_HAVE_GC_FW -DRN_COMPILE_ONLY_FIRMWARE -Itests/compile -fsyntax-only RedNavi/kern_probe.cpp
 
-.PHONY: all clean test mtl diag navi33-p4 check-kernel-firmware
+check-kernel-psp-firmware:
+	$(CXX) $(CXXFLAGS) -DRN_HAVE_PSP_FW -Itests/compile -fsyntax-only RedNavi/kern_probe.cpp
+
+.PHONY: all clean test mtl diag navi33-p4 check-kernel-firmware check-kernel-psp-firmware
