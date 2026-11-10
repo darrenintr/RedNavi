@@ -52,8 +52,10 @@ Then add exactly one P7 execution level:
 
 - `rednavi_navi33_p7_step=1`: first real hardware checkpoint. Populate the
   owned 1 MiB VMID0 PTE table with the exact retained 256-page IODMA list,
-  verify PTE readback, program GFXHUB/MMHUB, initialize invalidate engine 17,
-  and flush VMID0. No PSP firmware command is allowed.
+  verify PTE readback, program **MMHUB only**, acquire MMHUB invalidate engine
+  17's semaphore, flush VMID0, then release it. GFXHUB is deliberately
+  deferred until the graphics block is powered later in bring-up. No PSP
+  firmware command is allowed.
 - `rednavi_navi33_p7_step=2`: requires step-1 gates plus independently trusted
   PSP firmware metadata. Copy one PSP component at a time into the retained
   1 MiB host-DMA `fw_pri`, pass its GART VA through C2PMSG_36, execute the
@@ -76,6 +78,10 @@ pte_verified = 1
 bad_pte = 0xffffffff
 flush_rc = 0
 gart_ready = 1
+flush_hub = 1
+gfxhub_deferred = 1
+mmhub_last_ack & 1 = 1
+mmhub_last_sem & 1 = 1
 gart_start = 0x7fff00000000
 fw_pri = 0x7fff00000000
 pt_offset = 0x0ff00000
@@ -83,6 +89,16 @@ pt_offset = 0x0ff00000
 
 P6 ownership and carve reports must remain green. A PTE mismatch or failed
 invalidate blocks all later stages.
+
+### Why Step 1 uses MMHUB, not GFXHUB
+
+Real-hardware 0.0.12 testing proved that all 256 SYSTEM PTEs were written and
+read back correctly, but the GFXHUB engine-17 invalidate never acknowledged.
+This matches Linux GMC11 ordering: early `gmc_v11_0_gart_enable()` brings up
+MMHUB and flushes VMID0 there, while GFXHUB is owned by the later graphics
+bring-up. Linux also skips a GFXHUB register flush when the graphics block is
+not powered. P7 therefore treats MMHUB as the only early GART authority and
+does not touch GFXHUB until PSP/SMU/GC power-on has been established.
 
 ## Step-2 expected properties
 

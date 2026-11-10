@@ -401,6 +401,91 @@ void rn_mmhub_enable(struct rn_device *adev, const struct rn_gmc *gmc) {
 }
 
 // The registers rn_mmhub_enable changes, for a before/after look: context 0 control, TLB control, L2 control, page table base, start and end.
+static u32 gMmhubFlushFailures, gMmhubFlushLastAck, gMmhubFlushLastSem;
+
+void rn_mmhub_prepare_invalidation(struct rn_device *adev) {
+    // Linux mmhub_v3_0_program_invalidation() programs the full address
+    // range for every engine. P7 only owns engine 17, the GART engine.
+    WREG32_SOC15(RN_MMHUB, 0, regMMVM_INVALIDATE_ENG17_ADDR_RANGE_LO32,
+                 0xffffffffu);
+    WREG32_SOC15(RN_MMHUB, 0, regMMVM_INVALIDATE_ENG17_ADDR_RANGE_HI32,
+                 0x1fu);
+}
+
+int rn_mmhub_gart_flush(struct rn_device *adev) {
+    // Mirrors the pre-KIQ/MES path in Linux gmc_v11_0_flush_gpu_tlb() for
+    // MMHUB0. On bare metal Linux acquires the MMHUB invalidate semaphore,
+    // writes ENG17_REQ, waits for VMID0 ACK, then releases the semaphore.
+    if (gFlushLock) IOLockLock(gFlushLock);
+
+    int rc = -2; // semaphore timeout
+    bool semHeld = false;
+    for (int i = 0; i < 100000; ++i) {
+        gMmhubFlushLastSem =
+            RREG32_SOC15(RN_MMHUB, 0, regMMVM_INVALIDATE_ENG17_SEM);
+        if (gMmhubFlushLastSem & 1u) {
+            semHeld = true;
+            break;
+        }
+        udelay(1);
+    }
+
+    if (semHeld) {
+        u32 req = 0;
+        req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG17_REQ,
+                            PER_VMID_INVALIDATE_REQ, 1u);
+        req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG17_REQ,
+                            FLUSH_TYPE, 0u);
+        req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG17_REQ,
+                            INVALIDATE_L2_PTES, 1u);
+        req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG17_REQ,
+                            INVALIDATE_L2_PDE0, 1u);
+        req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG17_REQ,
+                            INVALIDATE_L2_PDE1, 1u);
+        req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG17_REQ,
+                            INVALIDATE_L2_PDE2, 1u);
+        req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG17_REQ,
+                            INVALIDATE_L1_PTES, 1u);
+        req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG17_REQ,
+                            CLEAR_PROTECTION_FAULT_STATUS_ADDR, 0u);
+
+        WREG32_SOC15(RN_MMHUB, 0, regMMVM_INVALIDATE_ENG17_REQ, req);
+        rc = -1; // ACK timeout
+        for (int i = 0; i < 100000; ++i) {
+            gMmhubFlushLastAck =
+                RREG32_SOC15(RN_MMHUB, 0, regMMVM_INVALIDATE_ENG17_ACK);
+            if (gMmhubFlushLastAck & 1u) {
+                rc = 0;
+                break;
+            }
+            udelay(1);
+        }
+
+        // Linux's bare-metal MMHUB path releases the semaphore with zero.
+        WREG32_SOC15(RN_MMHUB, 0, regMMVM_INVALIDATE_ENG17_SEM, 0u);
+
+        // gmc_v11_0 also performs the MMHUB private invalidation by toggling
+        // reserved bit 25 and reading it back to serialize the operation.
+        u32 priv = RREG32_SOC15(
+            RN_MMHUB, 0, regMMVM_L2_BANK_SELECT_RESERVED_CID2);
+        priv |= 1u << 25;
+        WREG32_SOC15(RN_MMHUB, 0,
+                     regMMVM_L2_BANK_SELECT_RESERVED_CID2, priv);
+        (void)RREG32_SOC15(
+            RN_MMHUB, 0, regMMVM_L2_BANK_SELECT_RESERVED_CID2);
+    }
+
+    if (rc) ++gMmhubFlushFailures;
+    if (gFlushLock) IOLockUnlock(gFlushLock);
+    return rc;
+}
+
+void rn_mmhub_flush_stats(u32 out[3]) {
+    out[0] = gMmhubFlushFailures;
+    out[1] = gMmhubFlushLastAck;
+    out[2] = gMmhubFlushLastSem;
+}
+
 void rn_mmhub_state(struct rn_device *adev, u32 out[8]) {
     out[0] = RREG32_SOC15(RN_MMHUB, 0, regMMVM_CONTEXT0_CNTL);
     out[1] = RREG32_SOC15(RN_MMHUB, 0, regMMMC_VM_MX_L1_TLB_CNTL);
