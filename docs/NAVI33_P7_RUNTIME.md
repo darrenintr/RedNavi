@@ -417,3 +417,32 @@ For MP0 13.0.7, Linux marks PMFW centralized C-state management as enabled and
 The native Linux evidence also pins the 512 MiB GART at
 `0x7fff00000000..0x7fff1fffffff`. P7 does not treat sOS-alive by itself as a
 rendering pass.
+
+
+### 0.0.21: GPCOM RPTR diagnostic checkpoint
+
+This diagnostic build records MP0 C2PMSG_68 (GPCOM RPTR) around the
+second ring submission without writing the read pointer or changing the
+command/fence protocol. New `navi33-p7-pmfw-runtime` fields:
+
+- `submit_rptr_before`: RPTR immediately before publishing frame 2
+- `submit_rptr_after_kick`: RPTR immediately after C2PMSG_67 WPTR write
+- `submit_rptr_final`: RPTR after fence completion or timeout
+
+Expected frame indices: first LOAD_TOC frame occupies DWORDs 0..15,
+second LOAD_IP_FW frame occupies DWORDs 16..31. Thus WPTR=32 after the
+second kick; RPTR=32 would indicate the PSP has advanced past frame 2.
+RPTR=16 suggests it has not retired frame 2; RPTR=0 suggests even the
+first frame's pointer state is not as expected. An RPTR advance does
+**not** prove successful firmware execution; inspect fence and response
+status as separate evidence.
+
+Linux PSP13 uses C2PMSG_67 for GPCOM WPTR, while C2PMSG_68 is the
+GPCOM RPTR defined by `psp_gfx_ctrl`. Do not write C2PMSG_68. Do not
+issue extra PSP commands on timeout. The firmware payload generator
+already extracts `ucode_size_bytes` at `ucode_array_offset_bytes`,
+matching Linux; `buf_size` and `buf_version` are also zero-initialized
+in Linux's command path, so do not change them as an unproven fix.
+
+Real-hardware validation remains pending. Compile-only CI does not
+establish RPTR/fence progress on RX 7600.
