@@ -4466,6 +4466,11 @@ void RedNaviProbe::stop(IOService *provider) {
     // P6.4 never exposes fw_pri to the GPU, so its DMA mapping is always safe
     // to tear down with the service regardless of the legacy gpuLive state.
     releaseNavi33FwPriDma();
+    // P6.5 is bookkeeping only; dropping the claim performs no hardware I/O.
+    navi33VramLedgerOwned = false;
+    navi33VramPtOffset = 0;
+    navi33VramScratchOffset = 0;
+    navi33VramDummyOffset = 0;
     if (regs) { regs->release(); regs = nullptr; }
     IOService::stop(provider);
 }
