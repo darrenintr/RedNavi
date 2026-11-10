@@ -313,15 +313,39 @@ fw_type          = GFX_FW_TYPE_SMU (18)
 Every PMFW staging PTE is read back and MMHUB VMID0 is invalidated before the
 command is submitted.
 
-Real-hardware 0.0.18 testing reached the PMFW command but timed out waiting
-for its fence while LOAD_TOC remained healthy. Two Linux-parity differences
-were identified and corrected in 0.0.19:
+Real-hardware 0.0.18 testing reached the PMFW command but timed out
+waiting for its fence while LOAD_TOC remained healthy. 0.0.19 then proved
+that a dedicated Linux-style PMFW staging buffer is correctly mapped:
 
-1. Linux stages non-PSP firmware in a separate `firmware.fw_buf` GTT
-   allocation, not in PSP `fw_pri`.
-2. Linux initializes `psp_timeout=20000` and polls at roughly 150–300 us,
-   yielding an effective several-second wait. RedNavi previously used a fixed
-   2-second wait; P7.3 now allows 6 seconds and records fence/ring telemetry.
+```text
+stage_prepared = 1
+stage_mapped = 1
+stage_page_count = 64
+stage_pte_verified = 1
+submit_wptr_before = 16
+submit_wptr_after = 32
+fence_expected = 2
+fence_observed = 0
+fence_polls = 6000
+```
+
+That result ruled out the PMFW buffer, GART PTEs, and the original 2-second
+timeout as the primary blocker. Two remaining Linux-parity differences are
+corrected in 0.0.20:
+
+1. Linux creates and initializes `firmware.fw_buf` before PSP `hw_init`,
+   therefore before the GPCOM ring is created. RedNavi now maps PMFW staging
+   pages together with the PSP runtime pages and performs a single VMID0
+   invalidate before ring creation. No GART mutation occurs between LOAD_TOC
+   and LOAD_IP_FW.
+2. Linux clears the PSP fence buffer once before ring initialization and
+   preserves the previous fence value across submissions. RedNavi no longer
+   clears the fence page for every command and records
+   `fence_before -> fence_expected -> fence_observed`.
+
+The 6-second P7.3 wait remains in place. Linux initializes
+`psp_timeout=20000` and polls at roughly 150–300 us, which gives an
+effective several-second timeout window.
 
 A successful Step 5 should publish `navi33-p7-pmfw-runtime` with:
 
@@ -345,7 +369,9 @@ stage_pte_verified = 1
 stage_bad_pte = 0xffffffff
 stage_mapping_error = 0
 stage_va = 0x7fff00103000
-fence_expected = fence_observed
+fence_before = 1
+fence_expected = 2
+fence_observed = 2
 fence_ok = 1
 status = 0
 accepted = 1
