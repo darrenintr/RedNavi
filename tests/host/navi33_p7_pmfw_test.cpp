@@ -17,6 +17,9 @@ static Input good() {
 }
 
 int main() {
+    static_assert(kStageFirstPage == 259u, "PMFW staging follows PSP runtime pages");
+    static_assert(kFenceTimeoutMs == 6000u, "PMFW fence timeout checkpoint");
+    static_assert(pageCount(261632u) == 64u, "Navi33 PMFW uses 64 pages");
     {
         auto r = inspect(good());
         assert(r.error == Error::Ok);
