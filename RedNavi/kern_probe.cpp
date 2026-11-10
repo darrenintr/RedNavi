@@ -310,6 +310,22 @@ class RedNaviProbe : public IOService {
     uint64_t navi33PspRuntimePages[rn_navi33::p7_postpsp::kRuntimePages] {};
     bool navi33PspRuntimePrepared {false};
     bool navi33PspRuntimeMapped {false};
+    // P7.3 dedicated non-PSP firmware staging. Linux uses firmware.fw_buf,
+    // separate from PSP fw_pri, for LOAD_IP_FW sources on bare metal.
+    IOBufferMemoryDescriptor *navi33PmfwBuf {nullptr};
+    IODMACommand *navi33PmfwDma {nullptr};
+    uint64_t *navi33PmfwPages {nullptr};
+    uint32_t navi33PmfwPageCount {0};
+    uint64_t navi33PmfwStageBytes {0};
+    bool navi33PmfwPrepared {false};
+    bool navi33PmfwMapped {false};
+
+    // Last P7 GPCOM submission telemetry.
+    uint32_t p7SubmitWptrBefore {0};
+    uint32_t p7SubmitWptrAfter {0};
+    uint32_t p7SubmitFenceExpected {0};
+    uint32_t p7SubmitFenceObserved {0};
+    uint32_t p7SubmitPolls {0};
     // P6.5 software-only VRAM reservation. These offsets are bookkeeping
     // claims only; P4 never writes them or exposes them to the GPU.
     bool navi33VramLedgerOwned {false};
@@ -506,6 +522,8 @@ private:
     void releaseNavi33FwPriDma();
     bool prepareNavi33PspRuntimeDma(uint32_t *mappingError);
     void releaseNavi33PspRuntimeDma();
+    bool prepareNavi33PmfwDma(uint64_t bytes, uint32_t *mappingError);
+    void releaseNavi33PmfwDma();
     bool createPspRingP7(uint64_t ringGpuVa);
     bool pspSubmitP7(uint64_t ringGpuVa, uint64_t cmdGpuVa,
                      uint64_t fenceGpuVa, uint32_t cmdId,
