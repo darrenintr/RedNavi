@@ -285,12 +285,40 @@ difference in either direction but exposes only
 macOS capture that is 8176 MiB, with CPU-visible VRAM clipped to the
 256 MiB BAR0.
 
-The corrected memory geometry still needs a third native USB boot before
-P5 can be declared passed. Expected next state: `preflight_error=0`,
-`memory-window-verified=Yes`, `address-geometry-verified=Yes`.
-With `IFWI=0x80000000` and `sOS=0`, P6 should then advance from
-`MemoryUnverified` to the fail-closed `NeedsVerifiedFirmware` state;
-that still does not authorize PSP commands.
+### Third native P5/P6 readback (2026-11-10)
+
+P4 bundle `0.0.3` passed the native memory gate:
+`preflight_error=0`, `navi33-memory-window-verified=Yes`,
+and `navi33-address-geometry-verified=Yes`.
+The audited geometry is GPU MC base `0x8000000000`, usable VRAM
+**8176 MiB**, CPU-visible BAR0 intersection **256 MiB**, and both
+MMHUB/GFX `FB_OFFSET=0`. This establishes P5 on the native RX7600.
+
+P6.1 then advanced exactly one fail-closed state:
+`status=8 (NeedsVerifiedFirmware)`, `ifwi_ready=1`,
+`sos_alive=0`, `firmware_required=1`,
+`may_issue_psp_commands=0`. The Linux-parity observation mask is
+`31` with blocker `5 (NoVerifiedGpuOwner)`. No PSP/GART/MES
+hardware write was enabled.
+
+### P6.2 firmware / ownership preflight
+
+P4 `0.0.4` adds a **read-only policy layer**, not a PSP loader.
+A locally generated `RedNavi/psp_fw.h` must come from the exact
+`psp_13_0_7_sos.bin` target, carry source SHA-256 metadata, have the
+inspected container size, contain SYS_DRV and SOS, and have no component
+larger than Linux's reusable 1 MiB `fw_pri` staging buffer.
+
+The Kext publishes `navi33-p6-boot-firmware` and
+`navi33-p6-staging`. Even valid firmware metadata does **not** grant
+VRAM/DMA ownership: the live staging input deliberately sets
+`exclusive_vram_owner=0` and `reservation_map_verified=0`, therefore
+P6.2 must stop at `NoOwnership` before any firmware copy, PSP mailbox
+write, ring creation or command submission.
+
+The existing legacy hard-coded PSP offsets are not considered ownership
+for Navi33. The next implementation gate is an explicit, retained buffer
+owner compatible with the native 256 MiB BAR0 / GPU address-space model.
 
 Do not add the P4 bundle to the known-good OpenCore EFI. Use only a
 separate, recoverable **test EFI**, and keep the clean boot path
@@ -301,13 +329,13 @@ before taking this risk.
 
 ### Next verified hardware checkpoint
 
-After rebuilding P4 with corrected MMHUB 3.0.2 offsets, reboot
-the isolated test USB and collect the P4/P5/P6 IORegistry fields
-including exact readback from
-`navi33-memory-preflight`, `navi33-address-space-audit`,
-`navi33-firmware-preflight`, `navi33-linux-boot-preflight`.
-Only after those checks can we wire the existing Navi33 PSP/GART/MES
-implementation into the RedNavi runtime. The historical Cobalt64
+Build P4 0.0.4 first without a local PSP header and verify that the live
+P6.2 properties fail at firmware proof. Then generate a local header
+from the exact PSP13.0.7 SOS image, rebuild the isolated USB Kext, and
+verify `navi33-p6-boot-firmware.error=0` while
+`navi33-p6-staging.error=3 (NoOwnership)`.
+Only after that checkpoint should RedNavi implement an explicit owned
+PSP staging/ring allocation; MES remains later. The historical Cobalt64
 compute proof was in a specific RX7600 GPU-passthrough environment;
 its absolute GPU VM/VRAM ownership must be revalidated on bare-metal
 Sequoia.
