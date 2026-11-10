@@ -301,24 +301,37 @@ P6.1 then advanced exactly one fail-closed state:
 `31` with blocker `5 (NoVerifiedGpuOwner)`. No PSP/GART/MES
 hardware write was enabled.
 
-### P6.2 firmware / ownership preflight
+### P6.2/P6.3 firmware, GART and ownership preflight
 
-P4 `0.0.4` adds a **read-only policy layer**, not a PSP loader.
+P4 `0.0.5` adds **read-only policy layers**, not a PSP/GART loader.
 A locally generated `RedNavi/psp_fw.h` must come from the exact
-`psp_13_0_7_sos.bin` target, carry source SHA-256 metadata, have the
-inspected container size, contain SYS_DRV and SOS, and have no component
-larger than Linux's reusable 1 MiB `fw_pri` staging buffer.
+`psp_13_0_7_sos.bin` target, carry source SHA-256 metadata, match the
+currently inspected 248496-byte container, contain SYS_DRV and SOS, and
+have no component larger than Linux's reusable 1 MiB `fw_pri` buffer.
+The generator handles packed PSP v2.0/v2.1 layouts and uses the PSP13
+bootloader command IDs from Linux.
 
-The Kext publishes `navi33-p6-boot-firmware` and
-`navi33-p6-staging`. Even valid firmware metadata does **not** grant
-VRAM/DMA ownership: the live staging input deliberately sets
-`exclusive_vram_owner=0` and `reservation_map_verified=0`, therefore
-P6.2 must stop at `NoOwnership` before any firmware copy, PSP mailbox
-write, ring creation or command submission.
+For a discrete Navi33, `fw_pri` is modeled as **host DMA memory reached
+through VMID0/GART**, not as a BAR0-visible VRAM offset. The Kext now
+publishes three fail-closed reports:
 
-The existing legacy hard-coded PSP offsets are not considered ownership
-for Navi33. The next implementation gate is an explicit, retained buffer
-owner compatible with the native 256 MiB BAR0 / GPU address-space model.
+- `navi33-p6-boot-firmware`: firmware container/component evidence.
+- `navi33-gart-owner-plan`: Linux-high 512 MiB GART geometry plus the
+  still-missing VRAM page-table and DMA ownership facts.
+- `navi33-p6-staging`: whether a retained 1 MiB DMA allocation has an
+  owned GART VA suitable for PSP `fw_pri`.
+
+The high-placement planner reproduces Linux's GC11 policy: with the
+47-bit pre-hole ceiling, 512 MiB GART aligns to
+`0x7fff00000000..0x7fff1fffffff`; its 131072 4 KiB pages need a
+1 MiB 64-bit PTE table. These are derived plan values, not permission to
+write hardware.
+
+Even valid firmware metadata does **not** grant ownership. No page-table
+storage, scratch/dummy VRAM, IODMA mapping, PTE write, GFXHUB/MMHUB
+programming, TLB flush, firmware copy or PSP command occurs in P4 0.0.5.
+The legacy fixed offsets such as `0x0C100000` and GART
+`0x2000000000` are not accepted as Navi33 ownership proof.
 
 Do not add the P4 bundle to the known-good OpenCore EFI. Use only a
 separate, recoverable **test EFI**, and keep the clean boot path
@@ -329,13 +342,18 @@ before taking this risk.
 
 ### Next verified hardware checkpoint
 
-Build P4 0.0.4 first without a local PSP header and verify that the live
-P6.2 properties fail at firmware proof. Then generate a local header
-from the exact PSP13.0.7 SOS image, rebuild the isolated USB Kext, and
-verify `navi33-p6-boot-firmware.error=0` while
-`navi33-p6-staging.error=3 (NoOwnership)`.
-Only after that checkpoint should RedNavi implement an explicit owned
-PSP staging/ring allocation; MES remains later. The historical Cobalt64
+Build P4 0.0.5 **without** a local PSP header first. Expected native
+results are `navi33-p6-boot-firmware.error=1 (WrongTarget/no local
+metadata)`, `navi33-p6-staging.error=2 (NoFirmwareProof)`, and
+`navi33-gart-owner-plan.error=4 (NoVramOwnership)` while still
+publishing GART `0x7fff00000000..0x7fff1fffffff` and a 1 MiB PTE table.
+
+Then generate a local header from the exact PSP13.0.7 SOS image and
+rebuild the isolated USB Kext. Firmware metadata should advance to
+`navi33-p6-boot-firmware.error=0`; staging should then stop at
+`error=4 (NoGartOwnership)`. That is the checkpoint before adding a
+real retained IOKit DMA owner + explicit VRAM page-table reservation and
+only later enabling GMC11 writes. MES remains later. The historical Cobalt64
 compute proof was in a specific RX7600 GPU-passthrough environment;
 its absolute GPU VM/VRAM ownership must be revalidated on bare-metal
 Sequoia.
