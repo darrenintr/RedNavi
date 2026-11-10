@@ -103,6 +103,7 @@
 #include "navi33_bootstrap.h"
 #include "navi33_p6_psp_preflight.h"
 #include "navi33_p7_runtime.h"
+#include "navi33_p7_postpsp.h"
 #include "navi33_p6_psp_boot_plan.h"
 #include "navi33_p6_psp_staging.h"
 #include "navi33_gart_owner.h"
@@ -295,6 +296,18 @@ class RedNaviProbe : public IOService {
     uint32_t navi33FwPriPageCount {0};
     uint64_t navi33FwPriBytes {0};
     bool navi33FwPriPrepared {false};
+    // Set only after P7 has installed these retained pages into live GPU
+    // page tables and completed the VMID0 flush. Until a verified hub/GART
+    // teardown exists, freeing the DMA mapping would leave dangling GPU PTEs.
+    bool navi33P7GartProgrammed {false};
+    // P7.1 PSP GPCOM shared memory: one 4 KiB page each for ring,
+    // command/response and fence. All three are host DMA pages mapped into
+    // VMID0/GART immediately after the 1 MiB fw_pri window.
+    IOBufferMemoryDescriptor *navi33PspRuntimeBuf {nullptr};
+    IODMACommand *navi33PspRuntimeDma {nullptr};
+    uint64_t navi33PspRuntimePages[rn_navi33::p7_postpsp::kRuntimePages] {};
+    bool navi33PspRuntimePrepared {false};
+    bool navi33PspRuntimeMapped {false};
     // P6.5 software-only VRAM reservation. These offsets are bookkeeping
     // claims only; P4 never writes them or exposes them to the GPU.
     bool navi33VramLedgerOwned {false};
@@ -489,6 +502,13 @@ private:
     void dumpRegs(const RNMailboxReg *list, size_t count, const char *property);
     bool prepareNavi33FwPriDma(bool enabled, uint32_t *mappingError);
     void releaseNavi33FwPriDma();
+    bool prepareNavi33PspRuntimeDma(uint32_t *mappingError);
+    void releaseNavi33PspRuntimeDma();
+    bool createPspRingP7(uint64_t ringGpuVa);
+    bool pspSubmitP7(uint64_t ringGpuVa, uint64_t cmdGpuVa,
+                     uint64_t fenceGpuVa, uint32_t cmdId,
+                     const uint32_t *args, uint32_t nargs,
+                     uint32_t *resp, uint32_t nresp);
 
 public:
     bool start(IOService *provider) override;
@@ -583,6 +603,175 @@ bool RedNaviProbe::prepareNavi33FwPriDma(bool enabled,
     navi33FwPriBytes = mapping.bytes;
     navi33FwPriPrepared = true;
     return true;
+}
+
+void RedNaviProbe::releaseNavi33PspRuntimeDma() {
+    if (navi33PspRuntimeDma) {
+        navi33PspRuntimeDma->clearMemoryDescriptor();
+        navi33PspRuntimeDma->release();
+        navi33PspRuntimeDma = nullptr;
+    }
+    if (navi33PspRuntimeBuf) {
+        navi33PspRuntimeBuf->release();
+        navi33PspRuntimeBuf = nullptr;
+    }
+    memset(navi33PspRuntimePages, 0, sizeof(navi33PspRuntimePages));
+    navi33PspRuntimePrepared = false;
+}
+
+bool RedNaviProbe::prepareNavi33PspRuntimeDma(uint32_t *mappingError) {
+    if (mappingError) *mappingError = 0;
+    if (navi33PspRuntimePrepared && navi33PspRuntimeBuf &&
+        navi33PspRuntimeDma)
+        return true;
+
+    releaseNavi33PspRuntimeDma();
+    constexpr uint64_t bytes =
+        rn_navi33::p7_postpsp::kRuntimePages * 4096ull;
+
+    navi33PspRuntimeBuf = IOBufferMemoryDescriptor::inTaskWithOptions(
+        kernel_task, kIODirectionInOut, bytes, 4096);
+    if (!navi33PspRuntimeBuf ||
+        !navi33PspRuntimeBuf->getBytesNoCopy()) {
+        releaseNavi33PspRuntimeDma();
+        return false;
+    }
+    memset(navi33PspRuntimeBuf->getBytesNoCopy(), 0, bytes);
+
+    navi33PspRuntimeDma = IODMACommand::withSpecification(
+        kIODMACommandOutputHost64,
+        rn_navi33::fw_pri_owner::kDmaAddressBits,
+        0, IODMACommand::kMapped, bytes, 4096, nullptr, nullptr);
+    if (!navi33PspRuntimeDma ||
+        navi33PspRuntimeDma->setMemoryDescriptor(
+            navi33PspRuntimeBuf) != kIOReturnSuccess) {
+        releaseNavi33PspRuntimeDma();
+        return false;
+    }
+
+    const auto mapping = rn_dma::collectPages<IODMACommand::Segment64>(
+        navi33PspRuntimePages,
+        rn_navi33::p7_postpsp::kRuntimePages, bytes,
+        [this](uint64_t *offset, IODMACommand::Segment64 *segments,
+               uint32_t *count) {
+            UInt64 dmaOffset = *offset;
+            UInt32 dmaCount = *count;
+            const IOReturn rc =
+                navi33PspRuntimeDma->genIOVMSegments(
+                    &dmaOffset, segments, &dmaCount);
+            *offset = dmaOffset;
+            *count = dmaCount;
+            return rc == kIOReturnSuccess;
+        });
+    if (!mapping.ok() ||
+        mapping.pageCount != rn_navi33::p7_postpsp::kRuntimePages ||
+        mapping.bytes != bytes) {
+        if (mappingError)
+            *mappingError = static_cast<uint32_t>(mapping.error);
+        releaseNavi33PspRuntimeDma();
+        return false;
+    }
+
+    navi33PspRuntimePrepared = true;
+    return true;
+}
+
+bool RedNaviProbe::createPspRingP7(uint64_t ringGpuVa) {
+    if (!navi33PspRuntimePrepared || !navi33PspRuntimeBuf)
+        return false;
+    uint32_t mp0 = 0;
+    if (!ipBase(kRNHwIdMp0, &mp0)) return false;
+    const uint32_t r64 = (mp0 + kRNMp0C2pmsg64) * 4;
+    const uint32_t r69 = (mp0 + kRNMp0C2pmsg69) * 4;
+    const uint32_t r70 = (mp0 + kRNMp0C2pmsg70) * 4;
+    const uint32_t r71 = (mp0 + kRNMp0C2pmsg71) * 4;
+    const uint32_t r81 = (mp0 + kRNMp0C2pmsg81) * 4;
+    if (rd(r81) == 0) return false;
+
+    uint32_t status = 0;
+    for (uint32_t ms = 0; ms < 2000u; ++ms) {
+        status = rd(r64);
+        if ((status & kRNPspMboxMask) == kRNPspBlReady) break;
+        IOSleep(1);
+    }
+    if ((status & kRNPspMboxMask) != kRNPspBlReady) return false;
+
+    uint8_t *base = static_cast<uint8_t *>(
+        navi33PspRuntimeBuf->getBytesNoCopy());
+    memset(base, 0, kRNPspRingSize);
+    OSSynchronizeIO();
+
+    wr(r69, static_cast<uint32_t>(ringGpuVa));
+    wr(r70, static_cast<uint32_t>(ringGpuVa >> 32));
+    wr(r71, kRNPspRingSize);
+    wr(r64, kRNPspRingTypeKm << 16);
+
+    for (uint32_t ms = 0; ms < 2000u; ++ms) {
+        status = rd(r64);
+        if ((status & kRNPspMboxMask) == kRNPspBlReady) break;
+        IOSleep(1);
+    }
+    return (status & kRNPspMboxMask) == kRNPspBlReady;
+}
+
+bool RedNaviProbe::pspSubmitP7(
+    uint64_t ringGpuVa, uint64_t cmdGpuVa, uint64_t fenceGpuVa,
+    uint32_t cmdId, const uint32_t *args, uint32_t nargs,
+    uint32_t *resp, uint32_t nresp) {
+    if (!navi33PspRuntimePrepared || !navi33PspRuntimeBuf ||
+        nargs > 64u || nresp > 64u)
+        return false;
+
+    uint32_t mp0 = 0;
+    if (!ipBase(kRNHwIdMp0, &mp0)) return false;
+    const uint32_t r67 = (mp0 + kRNMp0C2pmsg67) * 4;
+
+    uint8_t *base = static_cast<uint8_t *>(
+        navi33PspRuntimeBuf->getBytesNoCopy());
+    uint8_t *ring = base;
+    uint8_t *cmd = base + 4096;
+    uint8_t *fence = base + 8192;
+    memset(cmd, 0, 4096);
+    memset(fence, 0, 4096);
+
+    *reinterpret_cast<uint32_t *>(cmd + 8) = cmdId;
+    for (uint32_t n = 0; n < nargs; ++n)
+        *reinterpret_cast<uint32_t *>(cmd + 28 + n * 4) = args[n];
+
+    const uint32_t ringDw = kRNPspRingSize / 4;
+    const uint32_t wptr = rd(r67);
+    if ((wptr & 15u) || wptr >= ringDw) return false;
+
+    uint8_t *frame = ring + static_cast<uint64_t>(wptr) * 4;
+    memset(frame, 0, 64);
+    *reinterpret_cast<uint32_t *>(frame + 0) =
+        static_cast<uint32_t>(cmdGpuVa);
+    *reinterpret_cast<uint32_t *>(frame + 4) =
+        static_cast<uint32_t>(cmdGpuVa >> 32);
+    *reinterpret_cast<uint32_t *>(frame + 12) =
+        static_cast<uint32_t>(fenceGpuVa);
+    *reinterpret_cast<uint32_t *>(frame + 16) =
+        static_cast<uint32_t>(fenceGpuVa >> 32);
+    const uint32_t index = ++pspFence;
+    *reinterpret_cast<uint32_t *>(frame + 20) = index;
+    OSSynchronizeIO();
+    wr(r67, (wptr + 16u) % ringDw);
+
+    volatile uint32_t *fenceValue =
+        reinterpret_cast<volatile uint32_t *>(fence);
+    uint32_t observed = 0;
+    for (uint32_t ms = 0; ms < 2000u; ++ms) {
+        OSSynchronizeIO();
+        observed = *fenceValue;
+        if (observed == index) break;
+        IOSleep(1);
+    }
+
+    OSSynchronizeIO();
+    for (uint32_t n = 0; n < nresp; ++n)
+        resp[n] = *reinterpret_cast<volatile uint32_t *>(
+            cmd + 864 + n * 4);
+    return observed == index;
 }
 
 void RedNaviProbe::dumpPci() {
@@ -4476,6 +4665,7 @@ bool RedNaviProbe::start(IOService *provider) {
                         rn_gart_prepare_invalidation(&gpu);
                         p7FlushRc = rn_gart_flush(&gpu);
                         p7GartReady = p7FlushRc == 0;
+                        if (p7GartReady) navi33P7GartProgrammed = true;
                     }
                 }
 
@@ -4603,18 +4793,146 @@ bool RedNaviProbe::start(IOService *provider) {
                 p7Input.secureOsAlive = p7SosAfter != 0;
                 const auto p7AfterPsp =
                     rn_navi33::p7_runtime::inspect(p7Input);
+                uint32_t p71MappingError = 0;
+                bool p71RuntimeMapped = false;
+                bool p71RingCreated = false;
+                bool p71TocAccepted = false;
+                uint32_t p71TocStatus = 0xffffffffu;
+                uint32_t p71TmrBytes = 0;
+                const uint64_t p71RingGpuVa =
+                    gartPlan.gartStart +
+                    static_cast<uint64_t>(
+                        rn_navi33::p7_postpsp::kRingPage) * 4096ull;
+                const uint64_t p71CmdGpuVa =
+                    gartPlan.gartStart +
+                    static_cast<uint64_t>(
+                        rn_navi33::p7_postpsp::kCmdPage) * 4096ull;
+                const uint64_t p71FenceGpuVa =
+                    gartPlan.gartStart +
+                    static_cast<uint64_t>(
+                        rn_navi33::p7_postpsp::kFencePage) * 4096ull;
+
+                // Step 3's first executable checkpoint: prove that the sOS
+                // can consume a GPCOM ring backed by retained host DMA through
+                // the same VMID0/GART we just validated. Stop after LOAD_TOC;
+                // TMR ownership is a separate checkpoint.
+                if (p7StepArg >= 3u && p7AfterPsp.mayStartQueues &&
+                    p7GartReady && p7PspOk &&
+                    prepareNavi33PspRuntimeDma(&p71MappingError)) {
+                    bool ptesOk = true;
+                    for (uint32_t p = 0;
+                         p < rn_navi33::p7_postpsp::kRuntimePages; ++p) {
+                        const uint32_t index =
+                            rn_navi33::p7_postpsp::kRingPage + p;
+                        rn_gart_map_page(&gpu, &p7Gmc, index,
+                                         navi33PspRuntimePages[p]);
+                        const uint64_t got =
+                            rn_gart_read_pte(&gpu, &p7Gmc, index);
+                        const uint64_t expected =
+                            rn_system_pte(navi33PspRuntimePages[p]);
+                        if (got != expected) {
+                            ptesOk = false;
+                            break;
+                        }
+                    }
+                    if (ptesOk) {
+                        rn_gart_prepare_invalidation(&gpu);
+                        p71RuntimeMapped = rn_gart_flush(&gpu) == 0;
+                    }
+                    if (p71RuntimeMapped) {
+                        navi33PspRuntimeMapped = true;
+                        p71RingCreated = createPspRingP7(p71RingGpuVa);
+                    }
+
+#if defined(RN_HAVE_PSP_FW)
+                    if (p71RingCreated) {
+                        uint8_t *const fwPri = static_cast<uint8_t *>(
+                            navi33FwPriBuf->getBytesNoCopy());
+                        memset(fwPri, 0, navi33FwPriBytes);
+                        memcpy(fwPri, kRNPspToc, sizeof(kRNPspToc));
+                        OSSynchronizeIO();
+
+                        const uint32_t tocLen =
+                            static_cast<uint32_t>(sizeof(kRNPspToc));
+                        const uint32_t tocArgs[3] = {
+                            static_cast<uint32_t>(
+                                gartPlan.fwPriGpuAddress),
+                            static_cast<uint32_t>(
+                                gartPlan.fwPriGpuAddress >> 32),
+                            tocLen
+                        };
+                        uint32_t tocResp[5] = {};
+                        const bool fenceOk = pspSubmitP7(
+                            p71RingGpuVa, p71CmdGpuVa, p71FenceGpuVa,
+                            kRNPspCmdLoadToc, tocArgs, 3,
+                            tocResp, 5);
+                        p71TocStatus = tocResp[0];
+                        p71TmrBytes = tocResp[4];
+                        p71TocAccepted =
+                            fenceOk && p71TocStatus == 0 &&
+                            p71TmrBytes != 0;
+                    }
+#endif
+                }
+
+                rn_navi33::p7_postpsp::Input postInput{};
+                postInput.pspAlive = p7SosAfter != 0;
+                postInput.gartReady = p7GartReady;
+                postInput.runtimeDmaOwner =
+                    navi33PspRuntimePrepared;
+                postInput.gartStart = gartPlan.gartStart;
+                postInput.gartEnd = gartPlan.gartEnd;
+                postInput.ringGpuVa = p71RingGpuVa;
+                postInput.cmdGpuVa = p71CmdGpuVa;
+                postInput.fenceGpuVa = p71FenceGpuVa;
+                postInput.ringCreated = p71RingCreated;
+                postInput.tocAccepted = p71TocAccepted;
+                postInput.tmrBytes = p71TmrBytes;
+                // Deliberately false until a real TMR reservation ledger is
+                // implemented. Same-card Linux evidence is observation, not
+                // ownership.
+                postInput.tmrOwnershipVerified = false;
+                postInput.fbStart = stageGeometry.geometry.mcStart.value;
+                postInput.fbBytes = stageGeometry.geometry.usableVramBytes;
+                const auto postGate =
+                    rn_navi33::p7_postpsp::inspect(postInput);
+
+                const char *const p71n[] = {
+                    "step", "mapping_error", "runtime_dma_prepared",
+                    "runtime_mapped", "ring_created", "toc_accepted",
+                    "toc_status", "tmr_bytes", "post_gate_error",
+                    "may_setup_tmr", "may_load_ip_fw",
+                    "may_start_mes"
+                };
+                const uint32_t p71v[] = {
+                    p7StepArg, p71MappingError,
+                    static_cast<uint32_t>(navi33PspRuntimePrepared),
+                    static_cast<uint32_t>(p71RuntimeMapped),
+                    static_cast<uint32_t>(p71RingCreated),
+                    static_cast<uint32_t>(p71TocAccepted),
+                    p71TocStatus, p71TmrBytes,
+                    static_cast<uint32_t>(postGate.error),
+                    static_cast<uint32_t>(postGate.maySetupTmr),
+                    static_cast<uint32_t>(postGate.mayLoadIpFirmware),
+                    static_cast<uint32_t>(postGate.mayStartMes)
+                };
+                rnPublish(this, "navi33-p7-postpsp-runtime",
+                          p71n, p71v, sizeof(p71v) / sizeof(p71v[0]));
+
                 const char *const p7rn[] = {
                     "step", "gate_error", "gart_ready", "psp_ready",
-                    "sos_alive", "may_start_queues",
-                    "mes_started", "graphics_queue_started"
+                    "sos_alive", "post_psp_error",
+                    "may_start_queues", "mes_started",
+                    "graphics_queue_started"
                 };
                 const uint32_t p7rv[] = {
                     p7StepArg, static_cast<uint32_t>(p7AfterPsp.error),
                     static_cast<uint32_t>(p7GartReady),
                     static_cast<uint32_t>(p7PspOk),
                     static_cast<uint32_t>(p7SosAfter != 0),
+                    static_cast<uint32_t>(postGate.error),
                     static_cast<uint32_t>(
-                        p7AfterPsp.mayStartQueues && p7GartReady && p7PspOk),
+                        postGate.mayCreateGraphicsQueue),
                     0u, 0u
                 };
                 rnPublish(this, "navi33-p7-render-pipeline", p7rn, p7rv,
@@ -4746,9 +5064,20 @@ void RedNaviProbe::stop(IOService *provider) {
     if (doorbellKeep) { rn_set_doorbell(nullptr, 0); doorbellKeep->release(); doorbellKeep = nullptr; }
     if (!retainDma && hostDma) { hostDma->complete(); hostDma->clearMemoryDescriptor(); hostDma->release(); hostDma = nullptr; }
     if (!retainDma && hostBuf) { hostBuf->release(); hostBuf = nullptr; }
-    // P6.4 never exposes fw_pri to the GPU, so its DMA mapping is always safe
-    // to tear down with the service regardless of the legacy gpuLive state.
-    releaseNavi33FwPriDma();
+    if (!navi33PspRuntimeMapped) {
+        releaseNavi33PspRuntimeDma();
+    } else {
+        IOLog("RedNavi: P7.1 PSP runtime GART pages are live; retaining DMA backing until reboot\n");
+    }
+    // P6.4 ownership-only probes can be released normally. P7, however,
+    // installs these exact pages into live VMID0/GART PTEs. There is not yet
+    // a native-validated GFXHUB/MMHUB teardown path, so retain the backing
+    // until reboot rather than leave the GPU with dangling system PTEs.
+    if (!navi33P7GartProgrammed) {
+        releaseNavi33FwPriDma();
+    } else {
+        IOLog("RedNavi: P7 GART is live; retaining fw_pri DMA backing until reboot\n");
+    }
     // P6.5 is bookkeeping only; dropping the claim performs no hardware I/O.
     navi33VramLedgerOwned = false;
     navi33VramPtOffset = 0;

@@ -239,6 +239,8 @@ test:
 	./build/navi33_allocator_carve_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p7_runtime_test.cpp -o build/navi33_p7_runtime_test
 	./build/navi33_p7_runtime_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p7_postpsp_test.cpp -o build/navi33_p7_postpsp_test
+	./build/navi33_p7_postpsp_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_linux_boot_parity_test.cpp -o build/navi33_linux_boot_parity_test
 	./build/navi33_linux_boot_parity_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/dma_pages_test.cpp -o build/dma_pages_test
@@ -261,4 +263,7 @@ test:
 check-kernel-firmware:
 	$(CXX) $(CXXFLAGS) -DRN_HAVE_GC_FW -DRN_COMPILE_ONLY_FIRMWARE -Itests/compile -fsyntax-only RedNavi/kern_probe.cpp
 
-.PHONY: all clean test mtl diag navi33-p4 check-kernel-firmware
+check-kernel-psp-firmware:
+	$(CXX) $(CXXFLAGS) -DRN_HAVE_PSP_FW -Itests/compile -fsyntax-only RedNavi/kern_probe.cpp
+
+.PHONY: all clean test mtl diag navi33-p4 check-kernel-firmware check-kernel-psp-firmware
