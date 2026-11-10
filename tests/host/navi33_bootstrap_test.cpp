@@ -111,24 +111,38 @@ int main() {
     const auto window = makeMemoryWindow(0x8000, 0x81ff, 0, 8192, 0x10000000ull);
     assert(window.valid());
     assert(window.fbStart == 0x8000000000ull);
+    assert(window.locationBytes == 8ull * 1024 * 1024 * 1024);
     assert(window.fbBytes == 8ull * 1024 * 1024 * 1024);
     assert(window.cpuVisibleBytes == 256ull * 1024 * 1024);
-    // Actual macOS Sequoia 15.8.2: 256 MiB BAR0, even though the RX7600
-    // still has 8192 MiB physical VRAM and Linux saw 8176 MiB usable FB.
-    const auto observedMac = makeMemoryWindow(0x8000, 0x81fe, 0, 8192,
+
+    // Native macOS P4 v0.0.2 capture, 2026-11-10:
+    // FB_LOCATION=0x8000..0x81ff (8192 MiB), RCC_CONFIG_MEMSIZE=8176 MiB,
+    // BAR0=256 MiB. Linux GMC11 treats memsize as mc_vram_size and the
+    // location register as the base, so the conservative usable span is
+    // 8176 MiB rather than rejecting the one-unit disagreement.
+    const auto observedMac = makeMemoryWindow(0x8000, 0x81ff, 0, 8176,
                                                256ull << 20);
     assert(observedMac.valid());
+    assert(observedMac.locationBytes == 8192ull << 20);
+    assert(observedMac.vramBytes == 8176ull << 20);
     assert(observedMac.fbBytes == 8176ull << 20);
+    assert(observedMac.fbEnd == 0x81feffffffull);
     assert(observedMac.cpuVisibleBytes == 256ull << 20);
     assert(observedMac.fbStart == 0x8000000000ull);
-    // Physical RX7600: 8192 MiB BAR0, 8176 MiB usable FB, 16 MiB reserved.
+
+    // Native Linux reference: FB_LOCATION span 8176 MiB while memsize/BAR0
+    // span 8192 MiB. The inverse 16 MiB disagreement is accepted too.
     const auto captured = makeMemoryWindow(0x8000, 0x81fe, 0, 8192,
                                            8192ull * 1024 * 1024);
     assert(captured.valid());
+    assert(captured.locationBytes == 8176ull * 1024 * 1024);
     assert(captured.fbBytes == 8176ull * 1024 * 1024);
     assert(captured.cpuVisibleBytes == 8176ull * 1024 * 1024);
     assert(makeMemoryWindow(0x8000, 0x81fd, 0, 8192,
                             8192ull * 1024 * 1024).error ==
+           MemoryError::WindowTooSmall);
+    assert(makeMemoryWindow(0x8000, 0x81ff, 0, 8160,
+                            256ull << 20).error ==
            MemoryError::WindowTooSmall);
     assert(makeMemoryWindow(0x8000, 0x81fe, 0, 8192,
                             8192ull * 1024 * 1024 + 4096ull).error ==
