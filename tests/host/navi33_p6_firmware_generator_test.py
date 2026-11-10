@@ -16,8 +16,12 @@ SPEC.loader.exec_module(GEN)
 
 def image(minor: int, descriptors, aux_index=0):
     desc_start = 36 if minor == 0 else 40
-    header_size = desc_start + 16 * len(descriptors)
-    uoff = (header_size + 15) & ~15
+    # psp_fw_bin[] is a flexible array member. Linux firmware reports only
+    # the fixed structure size in header_size_bytes; descriptors live after
+    # that fixed header and before ucode_array_offset_bytes.
+    header_size = desc_start
+    desc_end = desc_start + 16 * len(descriptors)
+    uoff = (desc_end + 15) & ~15
     payload = bytearray()
     packed = []
     for typ, version, data in descriptors:
@@ -26,6 +30,7 @@ def image(minor: int, descriptors, aux_index=0):
         packed.append((typ, version, off, len(data)))
     b = bytearray(uoff + len(payload))
     struct.pack_into("<IIHH", b, 0, len(b), header_size, 2, minor)
+    struct.pack_into("<I", b, 20, len(payload))
     struct.pack_into("<I", b, 24, uoff)
     struct.pack_into("<I", b, 32, len(descriptors))
     if minor == 1:
@@ -53,6 +58,33 @@ class PspGeneratorTests(unittest.TestCase):
         self.assertEqual((major, minor), (2, 0))
         self.assertEqual(found["SYS_DRV"], (0x11, b"S" * 32))
         self.assertEqual(found["SOS"], (0x22, b"O" * 48))
+
+    def test_v20_fixed_header_does_not_include_flexible_descriptors(self):
+        data = image(0, [
+            (2, 0x00330024, b"S" * 32),
+            (1, 0x00330024, b"O" * 48),
+            (4, 0x0000000C, b"T" * 16),
+            (3, 0x04003300, b"K" * 16),
+            (5, 0x010033C0, b"P" * 16),
+        ])
+        self.assertEqual(struct.unpack_from("<I", data, 4)[0], 36)
+        self.assertGreater(36 + 16 * 5, 36)
+        _blob, major, minor, found = parse_bytes(data)
+        self.assertEqual((major, minor), (2, 0))
+        self.assertEqual(found["SYS_DRV"][0], 0x00330024)
+        self.assertEqual(found["SOS"][0], 0x00330024)
+        self.assertIn("TOC", found)
+        self.assertIn("KDB", found)
+        self.assertIn("SPL", found)
+
+    def test_rejects_descriptor_array_overlapping_payload(self):
+        data = bytearray(image(0, [
+            (2, 1, b"S" * 16),
+            (1, 1, b"O" * 16),
+        ]))
+        struct.pack_into("<I", data, 24, 36)
+        with self.assertRaisesRegex(ValueError, "descriptor table or ucode array"):
+            parse_bytes(bytes(data))
 
     def test_v21_skips_aux_half_like_linux_normal_path(self):
         data = image(1, [
