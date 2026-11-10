@@ -3904,41 +3904,6 @@ bool RedNaviProbe::start(IOService *provider) {
                     rn_navi33::MemoryWindow{};
                 const auto stageGeometry = rn_navi33::address::makeGeometry(
                     stageMemory, gfxFbOffsetRaw, gfxFbOffsetRead);
-                rn_navi33::p6_staging::Input stageInput{};
-                if (stageGeometry.ok()) {
-                    stageInput.fbStart = stageGeometry.geometry.mcStart.value;
-                    stageInput.fbBytes = stageGeometry.geometry.usableVramBytes;
-                    stageInput.cpuVisibleBytes = stageGeometry.geometry.cpuVisibleBytes;
-                }
-                stageInput.maxFirmwareComponentBytes = bootEvidence.maxComponentBytes;
-                stageInput.firmwareMetadataVerified = bootFirmware.metadataVerified;
-                // The generated local header was parsed from the exact target
-                // container and carries a SHA-256 record. Ownership is still
-                // intentionally false, so validate() cannot authorize writes.
-                stageInput.firmwareBytesVerified = bootFirmware.metadataVerified;
-                stageInput.p6PreflightPassed =
-                    gate.status == rn_navi33::p6_psp::Status::NeedsVerifiedFirmware;
-                stageInput.exclusiveVramOwner = false;
-                stageInput.reservationMapVerified = false;
-                const auto stage = rn_navi33::p6_staging::validate(stageInput);
-                const char *const stn[] = {
-                    "error", "p6_ready", "firmware_metadata_verified",
-                    "exclusive_vram_owner", "reservation_map_verified",
-                    "fb_mib", "cpu_visible_mib", "stage_bytes",
-                    "may_issue_psp_commands"
-                };
-                const uint32_t stv[] = {
-                    static_cast<uint32_t>(stage.error),
-                    static_cast<uint32_t>(stageInput.p6PreflightPassed),
-                    static_cast<uint32_t>(stageInput.firmwareMetadataVerified),
-                    0u, 0u,
-                    static_cast<uint32_t>(stageInput.fbBytes >> 20),
-                    static_cast<uint32_t>(stageInput.cpuVisibleBytes >> 20),
-                    rn_navi33::p6_boot::kStageBytes,
-                    static_cast<uint32_t>(stage.mayIssuePspCommands)
-                };
-                rnPublish(this, "navi33-p6-staging", stn, stv,
-                          sizeof(stv) / sizeof(stv[0]));
 
                 // P6.3 planning: derive Linux's high 512 MiB GART geometry
                 // from the validated P5 address space, but deliberately supply
@@ -3971,6 +3936,48 @@ bool RedNaviProbe::start(IOService *provider) {
                 };
                 rnPublish(this, "navi33-gart-owner-plan", gon, gov,
                           sizeof(gov) / sizeof(gov[0]));
+
+                // PSP fw_pri is not BAR0 VRAM on the Linux discrete-GPU path:
+                // it is a retained host DMA allocation reached through GART.
+                // Until the owner above is real, this gate must stop before
+                // any firmware copy or PSP mailbox operation.
+                rn_navi33::p6_staging::Input stageInput{};
+                stageInput.p6PreflightPassed =
+                    gate.status == rn_navi33::p6_psp::Status::NeedsVerifiedFirmware;
+                stageInput.firmwareBytesVerified = bootFirmware.metadataVerified;
+                stageInput.firmwareMetadataVerified = bootFirmware.metadataVerified;
+                stageInput.maxFirmwareComponentBytes =
+                    bootEvidence.maxComponentBytes;
+                stageInput.gartOwnershipVerified = gartPlan.ownershipVerified;
+                stageInput.gartStart = gartPlan.gartStart;
+                stageInput.gartEnd = gartPlan.gartEnd;
+                stageInput.fwPriGpuVa = gartPlan.fwPriGpuAddress;
+                stageInput.fwPriBytes = rn_navi33::p6_boot::kStageBytes;
+                stageInput.dmaMappingRetained = false;
+                stageInput.dmaPagesVerified = false;
+                stageInput.dmaBytes = 0;
+                const auto stage = rn_navi33::p6_staging::validate(stageInput);
+                const char *const stn[] = {
+                    "error", "p6_ready", "firmware_metadata_verified",
+                    "gart_owner", "dma_owner", "fw_pri_lo", "fw_pri_hi",
+                    "stage_bytes", "may_copy_firmware",
+                    "may_issue_psp_commands"
+                };
+                const uint32_t stv[] = {
+                    static_cast<uint32_t>(stage.error),
+                    static_cast<uint32_t>(stageInput.p6PreflightPassed),
+                    static_cast<uint32_t>(stageInput.firmwareMetadataVerified),
+                    static_cast<uint32_t>(stageInput.gartOwnershipVerified),
+                    static_cast<uint32_t>(stageInput.dmaMappingRetained &&
+                                          stageInput.dmaPagesVerified),
+                    static_cast<uint32_t>(stage.fwPriGpuVa),
+                    static_cast<uint32_t>(stage.fwPriGpuVa >> 32),
+                    static_cast<uint32_t>(stageInput.fwPriBytes),
+                    static_cast<uint32_t>(stage.mayCopyFirmware),
+                    static_cast<uint32_t>(stage.mayIssuePspCommands)
+                };
+                rnPublish(this, "navi33-p6-staging", stn, stv,
+                          sizeof(stv) / sizeof(stv[0]));
 
                 // Linux GC11.0.2 boot-parity preflight. This is a read-only
                 // status report; it does not substitute for a real PSP,
