@@ -6,7 +6,7 @@
 // All ownership / reservation assertions come from a future real GPU owner,
 // NOT from this planner or from WSL. Never use test offsets on a live GPU.
 #include <stdint.h>
-#include "navi33_psp_plan.h"
+#include "navi33_p6_psp_boot_plan.h"
 
 namespace rn_navi33 { namespace p6_staging {
 
@@ -29,7 +29,8 @@ struct Input {
     uint64_t fbStart = 0;           // validated P5 GPU MC address
     uint64_t fbBytes = 0;           // validated P5 usable FB span
     uint64_t cpuVisibleBytes = 0;   // validated P5 BAR0/FB intersection
-    uint32_t firmwarePlanBytes = 0; // P1 transfer-plan total (NOT firmware file bytes)
+    uint32_t maxFirmwareComponentBytes = 0; // largest verified PSP boot component
+    bool firmwareMetadataVerified = false; // P6 boot-plan metadata, not GPU ownership
     bool p6PreflightPassed = false;
     bool firmwareBytesVerified = false; // caller's externally checked SHA-256 assertion
     bool exclusiveVramOwner = false;    // must be proved by a real GPU allocator
@@ -56,7 +57,9 @@ constexpr bool overlaps(const Range &a, const Range &b) {
 inline Result validate(const Input &in) {
     Result out{};
     if (!in.p6PreflightPassed) return out;
-    if (!in.firmwareBytesVerified) { out.error = Error::NoFirmwareProof; return out; }
+    if (!in.firmwareBytesVerified || !in.firmwareMetadataVerified) {
+        out.error = Error::NoFirmwareProof; return out;
+    }
     if (!in.exclusiveVramOwner) { out.error = Error::NoOwnership; return out; }
     if (!in.reservationMapVerified || in.reservedCount == 0u ||
         in.reservedCount > kMaxReservedRanges) {
@@ -66,8 +69,8 @@ inline Result validate(const Input &in) {
         in.cpuVisibleBytes == 0u || in.cpuVisibleBytes > in.fbBytes) {
         out.error = Error::BadWindow; return out;
     }
-    if (in.firmwarePlanBytes == 0u ||
-        in.firmwarePlanBytes > psp_plan::kMaxStage) {
+    if (in.maxFirmwareComponentBytes == 0u ||
+        in.maxFirmwareComponentBytes > p6_boot::kStageBytes) {
         out.error = Error::BadFirmwareLength; return out;
     }
 
@@ -80,9 +83,10 @@ inline Result validate(const Input &in) {
     }
     for (unsigned i = 0; i < kRegionCount; ++i) {
         const Range &p = in.buffers[i];
-        // This is a draft host layout, not the final PSP13 ring format.
-        if ((i == 0u && (p.bytes < in.firmwarePlanBytes ||
-                         p.bytes > psp_plan::kMaxStage)) ||
+        // Linux PSP13 reuses one 1 MiB fw_pri buffer for every boot component.
+        // Ring/command/fence formats remain separately gated.
+        if ((i == 0u && (p.bytes != p6_boot::kStageBytes ||
+                         p.bytes < in.maxFirmwareComponentBytes)) ||
             (i != 0u && p.bytes != kPage)) {
             out.error = Error::BadBufferSize; return out;
         }
