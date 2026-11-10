@@ -4660,18 +4660,28 @@ bool RedNaviProbe::start(IOService *provider) {
                     }
 
                     if (p7PteVerified) {
-                        rn_gfxhub_enable(&gpu, &p7Gmc);
+                        // Linux GMC11 early hw_init enables only MMHUB, then
+                        // flushes VMID0 through MMHUB engine 17. GFXHUB is a
+                        // graphics-block responsibility and Linux refuses a
+                        // GFXHUB flush while gfx.is_poweron is false. P7 runs
+                        // before PSP/SMU/GC bring-up, so touching GFXHUB here
+                        // was too early and produced a permanent ACK timeout
+                        // on real Navi33 hardware.
                         rn_mmhub_enable(&gpu, &p7Gmc);
-                        rn_gart_prepare_invalidation(&gpu);
-                        p7FlushRc = rn_gart_flush(&gpu);
+                        rn_mmhub_prepare_invalidation(&gpu);
+                        p7FlushRc = rn_mmhub_gart_flush(&gpu);
                         p7GartReady = p7FlushRc == 0;
                         if (p7GartReady) navi33P7GartProgrammed = true;
                     }
                 }
 
+                uint32_t p7MmhubFlushStats[3] = {};
+                rn_mmhub_flush_stats(p7MmhubFlushStats);
                 const char *const p7gn[] = {
                     "step", "gate_error", "may_program_gart",
                     "pte_verified", "bad_pte", "flush_rc", "gart_ready",
+                    "flush_hub", "gfxhub_deferred", "mmhub_flush_failures",
+                    "mmhub_last_ack", "mmhub_last_sem",
                     "gart_start_lo", "gart_start_hi", "fw_pri_lo",
                     "fw_pri_hi", "pt_offset"
                 };
@@ -4681,6 +4691,8 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(p7PteVerified), p7BadPte,
                     static_cast<uint32_t>(p7FlushRc),
                     static_cast<uint32_t>(p7GartReady),
+                    1u, 1u, p7MmhubFlushStats[0],
+                    p7MmhubFlushStats[1], p7MmhubFlushStats[2],
                     static_cast<uint32_t>(gartPlan.gartStart),
                     static_cast<uint32_t>(gartPlan.gartStart >> 32),
                     static_cast<uint32_t>(gartPlan.fwPriGpuAddress),
@@ -4836,8 +4848,8 @@ bool RedNaviProbe::start(IOService *provider) {
                         }
                     }
                     if (ptesOk) {
-                        rn_gart_prepare_invalidation(&gpu);
-                        p71RuntimeMapped = rn_gart_flush(&gpu) == 0;
+                        rn_mmhub_prepare_invalidation(&gpu);
+                        p71RuntimeMapped = rn_mmhub_gart_flush(&gpu) == 0;
                     }
                     if (p71RuntimeMapped) {
                         navi33PspRuntimeMapped = true;
