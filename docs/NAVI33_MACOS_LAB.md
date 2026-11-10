@@ -267,6 +267,31 @@ Raw P6 mailbox reads were `IFWI=0x80000000` (ready bit set),
 sOS ownership, GPU VM setup, or PSP-ring command readiness.
 All PSP/GART/MES GPU writes remain disabled.
 
+### Second native P5 readback (2026-11-10)
+
+P4 bundle `0.0.2` confirmed the MMHUB 3.0.2 offset fix on the same
+RX7600. Live values were `FB_LOCATION_BASE=0x8000`,
+`FB_LOCATION_TOP=0x81ff`, `FB_OFFSET=0`,
+`RCC_CONFIG_MEMSIZE=8176 MiB`, and macOS BAR0 remained 256 MiB.
+The resulting MMHUB location span is 8192 MiB, exactly one 16 MiB unit
+larger than the NBIO/RCC memsize.
+
+This is not an MMIO-read failure. Linux GMC11 sets `mc_vram_size` from
+NBIO `get_memsize()` and uses MMHUB `get_fb_location()` as the VRAM
+base; RedNavi's old gate incorrectly required the FB_LOCATION span to
+never exceed memsize. P4 `0.0.3` therefore accepts a one-unit
+difference in either direction but exposes only
+`min(FB_LOCATION span, RCC memsize)` as usable VRAM. For this native
+macOS capture that is 8176 MiB, with CPU-visible VRAM clipped to the
+256 MiB BAR0.
+
+The corrected memory geometry still needs a third native USB boot before
+P5 can be declared passed. Expected next state: `preflight_error=0`,
+`memory-window-verified=Yes`, `address-geometry-verified=Yes`.
+With `IFWI=0x80000000` and `sOS=0`, P6 should then advance from
+`MemoryUnverified` to the fail-closed `NeedsVerifiedFirmware` state;
+that still does not authorize PSP commands.
+
 Do not add the P4 bundle to the known-good OpenCore EFI. Use only a
 separate, recoverable **test EFI**, and keep the clean boot path
 available. Never co-install the normal RedNavi and P4 bundles; both
