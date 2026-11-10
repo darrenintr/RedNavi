@@ -309,7 +309,9 @@ A locally generated `RedNavi/psp_fw.h` must come from the exact
 currently inspected 248496-byte container, contain SYS_DRV and SOS, and
 have no component larger than Linux's reusable 1 MiB `fw_pri` buffer.
 The generator handles packed PSP v2.0/v2.1 layouts and uses the PSP13
-bootloader command IDs from Linux.
+bootloader command IDs from Linux. Its SHA-256 is a reproducibility record,
+not trusted provenance until compared with an independently sourced expected
+digest.
 
 For a discrete Navi33, `fw_pri` is modeled as **host DMA memory reached
 through VMID0/GART**, not as a BAR0-visible VRAM offset. The Kext now
@@ -349,11 +351,14 @@ metadata)`, `navi33-p6-staging.error=2 (NoFirmwareProof)`, and
 publishing GART `0x7fff00000000..0x7fff1fffffff` and a 1 MiB PTE table.
 
 Then generate a local header from the exact PSP13.0.7 SOS image and
-rebuild the isolated USB Kext. Firmware metadata should advance to
-`navi33-p6-boot-firmware.error=0`; staging should then stop at
-`error=4 (NoGartOwnership)`. That is the checkpoint before adding a
-real retained IOKit DMA owner + explicit VRAM page-table reservation and
-only later enabling GMC11 writes. MES remains later. The historical Cobalt64
+rebuild the isolated USB Kext. Firmware **metadata** may advance to
+`navi33-p6-boot-firmware.error=0`, but `firmware_digest_trusted`
+remains 0 and P6 staging deliberately stays at
+`error=2 (NoFirmwareProof)` until an independently sourced expected
+SHA-256 is pinned and compared. In parallel the separate GART report
+remains `error=4 (NoVramOwnership)`. Only after both proof chains are
+closed should RedNavi add a retained IOKit DMA owner + explicit VRAM
+page-table reservation and later enable GMC11 writes. MES remains later. The historical Cobalt64
 compute proof was in a specific RX7600 GPU-passthrough environment;
 its absolute GPU VM/VRAM ownership must be revalidated on bare-metal
 Sequoia.
