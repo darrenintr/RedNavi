@@ -166,6 +166,7 @@
 #define kRNPspCmdVramOffset   0x40210000ull    // 4 KB command/response buffer, 4 KB aligned
 #define kRNPspFenceVramOffset 0x40220000ull    // 4 KB fence buffer
 #define kRNMp0C2pmsg67        0x083
+#define kRNMp0C2pmsg68        0x084       // GPCOM ring read pointer (owned/advanced by PSP)
 #define kRNPspCmdSetupTmr     0x05u            // GFX_CMD_ID_SETUP_TMR
 #define kRNPspTmrVramOffset   0x02000000ull    // 32 MB into VRAM: inside the 256 MB CPU-visible BAR0
 #define kRNPspCmdLoadToc      0x20u            // GFX_CMD_ID_LOAD_TOC
@@ -217,7 +218,8 @@ static const RNMailboxReg kRNMailboxRegs[] = {
     {"MP0_C2PMSG_35", kRNHwIdMp0, 0x063},  // bootloader command / status, bit 31: ready
     {"MP0_C2PMSG_36", kRNHwIdMp0, 0x064},  // bootloader address
     {"MP0_C2PMSG_64", kRNHwIdMp0, 0x080},  // ring command / response
-    {"MP0_C2PMSG_67", kRNHwIdMp0, 0x083},  // ring write pointer
+    {"MP0_C2PMSG_67", kRNHwIdMp0, 0x083},  // GPCOM ring write pointer
+    {"MP0_C2PMSG_68", kRNHwIdMp0, 0x084},  // GPCOM ring read pointer
     {"MP0_C2PMSG_71", kRNHwIdMp0, 0x087},  // ring size
     {"MP0_C2PMSG_81", kRNHwIdMp0, 0x091},  // sOS alive when not zero
     {"MP1_C2PMSG_66", kRNHwIdMp1, 0x282},  // SMU message
@@ -323,6 +325,9 @@ class RedNaviProbe : public IOService {
     // Last P7 GPCOM submission telemetry.
     uint32_t p7SubmitWptrBefore {0};
     uint32_t p7SubmitWptrAfter {0};
+    uint32_t p7SubmitRptrBefore {0};
+    uint32_t p7SubmitRptrAfterKick {0};
+    uint32_t p7SubmitRptrFinal {0};
     uint32_t p7SubmitFenceBefore {0};
     uint32_t p7SubmitFenceExpected {0};
     uint32_t p7SubmitFenceObserved {0};
@@ -851,6 +856,7 @@ bool RedNaviProbe::pspSubmitP7(
     uint32_t mp0 = 0;
     if (!ipBase(kRNHwIdMp0, &mp0)) return false;
     const uint32_t r67 = (mp0 + kRNMp0C2pmsg67) * 4;
+    const uint32_t r68 = (mp0 + kRNMp0C2pmsg68) * 4;
 
     uint8_t *base = static_cast<uint8_t *>(
         navi33PspRuntimeBuf->getBytesNoCopy());
@@ -876,6 +882,9 @@ bool RedNaviProbe::pspSubmitP7(
     const uint32_t wptr = rd(r67);
     p7SubmitWptrBefore = wptr;
     p7SubmitWptrAfter = wptr;
+    p7SubmitRptrBefore = rd(r68);
+    p7SubmitRptrAfterKick = p7SubmitRptrBefore;
+    p7SubmitRptrFinal = p7SubmitRptrBefore;
     p7SubmitFenceExpected = 0;
     p7SubmitFenceObserved = p7SubmitFenceBefore;
     p7SubmitPolls = 0;
@@ -899,6 +908,7 @@ bool RedNaviProbe::pspSubmitP7(
     const uint32_t nextWptr = (wptr + 16u) % ringDw;
     wr(r67, nextWptr);
     p7SubmitWptrAfter = rd(r67);
+    p7SubmitRptrAfterKick = rd(r68);
 
     uint32_t observed = p7SubmitFenceBefore;
     for (uint32_t ms = 0;
@@ -911,6 +921,7 @@ bool RedNaviProbe::pspSubmitP7(
         IOSleep(1);
     }
 
+    p7SubmitRptrFinal = rd(r68);
     OSSynchronizeIO();
     for (uint32_t n = 0; n < nresp; ++n)
         resp[n] = *reinterpret_cast<volatile uint32_t *>(
@@ -5288,6 +5299,9 @@ bool RedNaviProbe::start(IOService *provider) {
                 // submission when PMFW staging itself fails.
                 p7SubmitWptrBefore = 0;
                 p7SubmitWptrAfter = 0;
+                p7SubmitRptrBefore = 0;
+                p7SubmitRptrAfterKick = 0;
+                p7SubmitRptrFinal = 0;
                 p7SubmitFenceBefore = 0;
                 p7SubmitFenceExpected = 0;
                 p7SubmitFenceObserved = 0;
@@ -5339,6 +5353,8 @@ bool RedNaviProbe::start(IOService *provider) {
                     "stage_bad_pte", "stage_mapping_error",
                     "stage_va_lo", "stage_va_hi",
                     "submit_wptr_before", "submit_wptr_after",
+                    "submit_rptr_before", "submit_rptr_after_kick",
+                    "submit_rptr_final",
                     "fence_before", "fence_expected", "fence_observed",
                     "fence_polls", "fence_timeout_ms",
                     "fence_ok", "status", "fw_addr_lo", "fw_addr_hi",
@@ -5366,6 +5382,8 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(p73StageGpuVa),
                     static_cast<uint32_t>(p73StageGpuVa >> 32),
                     p7SubmitWptrBefore, p7SubmitWptrAfter,
+                    p7SubmitRptrBefore, p7SubmitRptrAfterKick,
+                    p7SubmitRptrFinal,
                     p7SubmitFenceBefore,
                     p7SubmitFenceExpected, p7SubmitFenceObserved,
                     p7SubmitPolls,
