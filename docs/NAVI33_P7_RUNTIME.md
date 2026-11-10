@@ -90,6 +90,16 @@ pt_offset = 0x0ff00000
 P6 ownership and carve reports must remain green. A PTE mismatch or failed
 invalidate blocks all later stages.
 
+### MMHUB 3.0.2 register map
+
+Navi33 advertises MMHUB 3.0.2. Real-hardware 0.0.13 testing exposed that the
+native bring-up header was still generated from mmhub_3_0_0 offsets: PTE
+backing itself verified, but ENG17 semaphore read zero because the driver was
+accessing the 3.0.0 register locations. P7 now generates every programmed
+MMHUB register from mmhub_3_0_2_offset.h / _sh_mask.h. This includes the
+system aperture, L1/L2 controls, context 0 page-table registers, fault
+registers, and invalidate engine 17.
+
 ### Why Step 1 uses MMHUB, not GFXHUB
 
 Real-hardware 0.0.12 testing proved that all 256 SYSTEM PTEs were written and
