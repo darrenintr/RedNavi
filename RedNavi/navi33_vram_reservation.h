@@ -22,6 +22,7 @@ enum class Error : uint8_t {
     Ok,
     BadBar,
     BadConsole,
+    ConsoleAddressNotPhysical,
     ConsoleOutsideBar,
     ConsoleOverflow,
     TooLittleVisibleVram,
@@ -33,7 +34,7 @@ struct Input {
     uint64_t barBytes = 0;
     uint64_t cpuVisibleBytes = 0;
 
-    uint64_t consolePhys = 0;
+    uint64_t consoleRawAddress = 0; // PE_current_console v_baseAddr
     uint64_t consoleRowBytes = 0;
     uint32_t consoleHeight = 0;
 };
@@ -50,6 +51,8 @@ struct Plan {
     Range scratch{};
     Range dummy{};
     uint64_t consoleBytes = 0;
+    uint64_t consolePhys = 0;       // decoded physical address
+    bool consolePhysicalEncoded = false;
     bool consoleInsideBar = false;
     bool candidateNonOverlapping = false;
     bool reservationOwned = false; // ALWAYS false in this planner.
@@ -73,10 +76,22 @@ inline Plan inspect(const Input &in) {
         in.cpuVisibleBytes > in.barBytes) {
         return p;
     }
-    if (!in.consolePhys || !in.consoleRowBytes || !in.consoleHeight) {
+    if (!in.consoleRawAddress || !in.consoleRowBytes || !in.consoleHeight) {
         p.error = Error::BadConsole;
         return p;
     }
+    // x86 IONDRVFramebuffer interprets bit 0 of csBaseAddr as "this value
+    // is a physical framebuffer address". It then reconstructs the true
+    // physical address with PAGE_MASK & vAddr & ~1. PE_current_console()
+    // exposes the same boot-console encoding on the native RX7600 capture.
+    // If the bit is clear, the value is a kernel virtual address and this
+    // host-only planner refuses to guess/pmap-translate it.
+    if (!(in.consoleRawAddress & 1ull)) {
+        p.error = Error::ConsoleAddressNotPhysical;
+        return p;
+    }
+    p.consolePhysicalEncoded = true;
+    p.consolePhys = in.consoleRawAddress & ~1ull;
     if (in.consoleRowBytes > UINT64_MAX / in.consoleHeight) {
         p.error = Error::ConsoleOverflow;
         return p;
@@ -91,11 +106,11 @@ inline Plan inspect(const Input &in) {
     }
     p.consoleBytes = pixelsBytes + 128u;
 
-    if (in.consolePhys < in.barPhys) {
+    if (p.consolePhys < in.barPhys) {
         p.error = Error::ConsoleOutsideBar;
         return p;
     }
-    p.console.offset = in.consolePhys - in.barPhys;
+    p.console.offset = p.consolePhys - in.barPhys;
     p.console.bytes = p.consoleBytes;
     if (!validRange(p.console.offset, p.console.bytes, in.barBytes)) {
         p.error = Error::ConsoleOutsideBar;
