@@ -58,8 +58,11 @@ Then add exactly one P7 execution level:
   firmware command is allowed.
 - `rednavi_navi33_p7_step=2`: requires step-1 gates plus independently trusted
   PSP firmware metadata. Copy one PSP component at a time into the retained
-  1 MiB host-DMA `fw_pri`, pass its GART VA through C2PMSG_36, execute the
-  PSP13 bootloader chain, and require C2PMSG_81 to become nonzero.
+  1 MiB host-DMA `fw_pri`, pass its GART VA through C2PMSG_36, and execute
+  the PSP13 bootloader chain. For first hardware admission, add
+  `rednavi_navi33_p7_psp_limit=N` to cap the number of bootloader commands.
+  This makes KDB/SPL/SYS/SOS independently observable before allowing the
+  whole chain to reach C2PMSG_81.
 - `rednavi_navi33_p7_step=3`: currently only publishes render/queue admission
   after sOS is alive. It deliberately does not start MES or a graphics queue.
 
@@ -112,36 +115,101 @@ does not touch GFXHUB until PSP/SMU/GC power-on has been established.
 
 ## Step-2 expected properties
 
-With the pinned PSP header, `navi33-p7-psp-runtime` should progress to:
+The first 0.0.15 hardware run should use:
+
+```text
+rednavi_navi33_p7_step=2
+rednavi_navi33_p7_psp_limit=1
+```
+
+That deliberately executes only the first generated bootloader command (KDB).
+A successful limited checkpoint should report:
 
 ```text
 firmware_metadata_verified = 1
 firmware_digest_trusted = 1
 gart_ready = 1
 may_issue_psp_bootloader = 1
-chain_done > 0
+chain_total = 4
+chain_target = 1
+chain_limited = 1
+chain_done = 1
+failed_index = 0xffffffff
+failure_reason = 0
+last_cmd = 0x00080000
+last_c2pmsg35_before = 0x80000000
+last_c2pmsg35_after = 0x80000000
+sos_after = 0
+psp_ok = 0
+```
+
+`psp_ok=0` is expected while the chain is deliberately limited. Increase the
+limit only after the previous checkpoint is accepted:
+
+```text
+1 = KDB
+2 = KDB + PSP13 SPL-table command
+3 = KDB + SPL-table + SYS_DRV
+4 = full pinned chain ending in SOS
+```
+
+For PSP13, Linux's SPL callback is intentionally unusual: `psp_hw_start()`
+requires the SPL descriptor to be present, but
+`psp_v13_0_bootloader_load_spl()` copies the KDB payload again before issuing
+`PSP_BL__LOAD_TOS_SPL_TABLE`. P7 mirrors that behavior. The standalone SPL
+descriptor bytes remain available in the generated header but are not sent by
+that command.
+
+The pinned PSP13.0.7 image therefore generates the executable sequence:
+
+```text
+KDB      -> LOAD_KEY_DATABASE      (KDB bytes)
+SPL      -> LOAD_TOS_SPL_TABLE     (KDB bytes again)
+SYS_DRV  -> LOAD_SYSDRV            (SYS_DRV bytes)
+SOS      -> LOAD_SOSDRV            (SOS bytes)
+```
+
+Linux also allocates the ordinary bare-metal `fw_pri` in GTT/system memory
+unless SR-IOV, an explicit debug VRAM option, or XGMI requires VRAM. P7's
+retained host-DMA `fw_pri` behind the verified MMHUB VMID0 GART therefore
+matches the normal dGPU placement model.
+
+Step-2 failure diagnostics use:
+
+```text
+failure_reason = 0  no failure
+                 1  bootloader was not ready before the command
+                 2  component exceeded the 1 MiB fw_pri
+                 3  non-SOS command never returned C2PMSG_35=0x80000000
+                 4  SOS command did not change C2PMSG_81
+                 5  MP0 base or fw_pri CPU buffer was unavailable
+```
+
+A complete four-command run should finally reach:
+
+```text
+chain_done = chain_total = 4
 sos_before = 0
 sos_after != 0
 psp_ok = 1
 ```
 
-The exact chain length depends on components present in the pinned packed PSP
-container; P7 uses the parser-generated component list rather than assuming a
-fixed count.
-
 ## Render-pipeline boundary
 
-The same-card Linux capture shows the next real sequence after GART/PSP:
+For MP0 13.0.7, Linux marks PMFW centralized C-state management as enabled and
+`boot_time_tmr=false`. The relevant order after the bootloader chain is:
 
 1. create the PSP GPCOM ring;
-2. LOAD_TOC and SETUP_TMR;
-3. reserve the observed PSP TMR (Linux capture: `0x1300000` bytes from GPU MC
-   `0x81fc000000`);
-4. load GC/SDMA/MES/SMU/DMUB firmware through the PSP path;
-5. initialize SMU;
-6. bring up MES scheduler + KIQ;
-7. map the first graphics queue and prove a completed fence;
-8. only then expose the path to RADV/Metal translation.
+2. LOAD_TOC to let PSP calculate the required TMR size;
+3. reserve the observed PSP TMR (same-card Linux capture: `0x1300000` bytes
+   from GPU MC `0x81fc000000`);
+4. load SMU/PMFW through PSP **before** SETUP_TMR;
+5. SETUP_TMR;
+6. load the remaining GC/SDMA/MES/DMUB firmware through PSP;
+7. initialize SMU and the graphics blocks;
+8. bring up MES scheduler + KIQ;
+9. map the first graphics queue and prove a completed fence;
+10. only then expose the path to RADV/Metal translation.
 
 The native Linux evidence also pins the 512 MiB GART at
 `0x7fff00000000..0x7fff1fffffff`. P7 does not treat sOS-alive by itself as a
