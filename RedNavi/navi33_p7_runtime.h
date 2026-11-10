@@ -1,0 +1,88 @@
+#ifndef REDNAVI_NAVI33_P7_RUNTIME_H
+#define REDNAVI_NAVI33_P7_RUNTIME_H
+// SPDX-License-Identifier: BSD-3-Clause
+//
+// Navi33 P7 execution gate. This is a pure policy contract: no MMIO, DMA,
+// firmware copy, allocator mutation or queue submission occurs here.
+//
+// step 0: observation only
+// step 1: install the already-owned VMID0/GART mapping
+// step 2: additionally allow the verified PSP13.0.7 boot chain
+// step 3: queue/render bring-up, but only after sOS is observed alive
+#include <stdint.h>
+
+namespace rn_navi33 { namespace p7_runtime {
+
+enum class Error : uint8_t {
+    Ok = 0,
+    Disabled,
+    IdentityUnverified,
+    MemoryUnverified,
+    NoLedger,
+    CarveUnverified,
+    RuntimeBusy,
+    NoDmaOwner,
+    NoGartOwner,
+    FirmwareMetadataUnverified,
+    FirmwareDigestUntrusted,
+    SecureOsNotAlive,
+};
+
+struct Input {
+    uint32_t step = 0;
+    bool identityVerified = false;
+    bool memoryVerified = false;
+    bool ledgerOwned = false;
+    bool carveVerified = false;
+    bool runtimeQuiescent = false;
+    bool dmaOwnerVerified = false;
+    bool gartOwnerVerified = false;
+    bool firmwareMetadataVerified = false;
+    bool firmwareDigestTrusted = false;
+    bool secureOsAlive = false;
+};
+
+struct Report {
+    Error error = Error::Disabled;
+    uint32_t step = 0;
+    bool mayProgramGart = false;
+    bool mayCopyFirmware = false;
+    bool mayIssuePspBootloader = false;
+    bool mayStartQueues = false;
+};
+
+inline Report inspect(const Input &in) {
+    Report r{};
+    r.step = in.step;
+    if (in.step == 0) return r;
+    if (!in.identityVerified) { r.error = Error::IdentityUnverified; return r; }
+    if (!in.memoryVerified) { r.error = Error::MemoryUnverified; return r; }
+    if (!in.ledgerOwned) { r.error = Error::NoLedger; return r; }
+    if (!in.carveVerified) { r.error = Error::CarveUnverified; return r; }
+    if (!in.runtimeQuiescent) { r.error = Error::RuntimeBusy; return r; }
+    if (!in.dmaOwnerVerified) { r.error = Error::NoDmaOwner; return r; }
+    if (!in.gartOwnerVerified) { r.error = Error::NoGartOwner; return r; }
+
+    r.mayProgramGart = true;
+    if (in.step == 1) { r.error = Error::Ok; return r; }
+
+    if (!in.firmwareMetadataVerified) {
+        r.error = Error::FirmwareMetadataUnverified; return r;
+    }
+    if (!in.firmwareDigestTrusted) {
+        r.error = Error::FirmwareDigestUntrusted; return r;
+    }
+    r.mayCopyFirmware = true;
+    r.mayIssuePspBootloader = true;
+
+    if (in.step == 2) { r.error = Error::Ok; return r; }
+    if (!in.secureOsAlive) {
+        r.error = Error::SecureOsNotAlive; return r;
+    }
+    r.mayStartQueues = true;
+    r.error = Error::Ok;
+    return r;
+}
+
+}} // namespace rn_navi33::p7_runtime
+#endif
