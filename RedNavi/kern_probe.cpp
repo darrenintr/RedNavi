@@ -4162,6 +4162,69 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-vram-reservation-ledger", vln, vlv,
                           sizeof(vlv) / sizeof(vlv[0]));
 
+                // P6.6: software-only allocator carve + runtime quiescence
+                // audit. This models removal of the owned tail range from the
+                // future visible-VRAM allocator, but does NOT mutate visPool.
+                uint32_t carveArg = 0;
+                const bool carveRequested =
+                    navi33VramLedgerOwned &&
+                    PE_parse_boot_argn("rednavi_navi33_allocator_carve_probe",
+                                       &carveArg, sizeof(carveArg)) &&
+                    carveArg == 1u;
+                rn_navi33::allocator_carve::Input carveInput{};
+                carveInput.requested = carveRequested;
+                carveInput.ledgerOwned = navi33VramLedgerOwned;
+                carveInput.gpuLive = gpuLive;
+                carveInput.vmReady = vmReady;
+                carveInput.gfxQueueOk = gfxQueueOk;
+                carveInput.rednaviFramebufferReady = fbReady;
+                carveInput.boCount = boCount;
+                carveInput.vmidUsed = vmidUsed;
+                carveInput.reservation = {
+                    navi33VramScratchOffset,
+                    ledger.reservedBytes
+                };
+                const auto carve =
+                    rn_navi33::allocator_carve::inspect(carveInput);
+
+                const char *const can[] = {
+                    "error", "requested", "ledger_owned", "quiescent",
+                    "gpu_live", "vm_ready", "gfx_queue_ok", "fb_ready",
+                    "bo_count", "vmid_used", "pool_start", "pool_bytes",
+                    "reservation_start", "reservation_bytes",
+                    "before_pages", "reserved_pages", "after_pages",
+                    "left_start", "left_bytes", "right_start", "right_bytes",
+                    "carve_verified", "may_mutate_allocator", "may_write_vram"
+                };
+                const uint32_t cav[] = {
+                    static_cast<uint32_t>(carve.error),
+                    static_cast<uint32_t>(carveRequested),
+                    static_cast<uint32_t>(navi33VramLedgerOwned),
+                    static_cast<uint32_t>(carve.quiescent),
+                    static_cast<uint32_t>(gpuLive),
+                    static_cast<uint32_t>(vmReady),
+                    static_cast<uint32_t>(gfxQueueOk),
+                    static_cast<uint32_t>(fbReady),
+                    boCount,
+                    vmidUsed,
+                    static_cast<uint32_t>(carveInput.pool.offset),
+                    static_cast<uint32_t>(carveInput.pool.bytes),
+                    static_cast<uint32_t>(carveInput.reservation.offset),
+                    static_cast<uint32_t>(carveInput.reservation.bytes),
+                    carve.beforePages,
+                    carve.reservedPages,
+                    carve.afterPages,
+                    static_cast<uint32_t>(carve.left.offset),
+                    static_cast<uint32_t>(carve.left.bytes),
+                    static_cast<uint32_t>(carve.right.offset),
+                    static_cast<uint32_t>(carve.right.bytes),
+                    static_cast<uint32_t>(carve.carveVerified),
+                    static_cast<uint32_t>(carve.mayMutateAllocator),
+                    static_cast<uint32_t>(carve.mayWriteVram)
+                };
+                rnPublish(this, "navi33-p6-allocator-carve", can, cav,
+                          sizeof(cav) / sizeof(cav[0]));
+
                 // P6.4 ownership-only probe. Opt-in allocation of Linux's 1 MiB
                 // PSP fw_pri host backing. IOKit may create/retain DMA IOVAs,
                 // but this path NEVER writes a GPU GART PTE or hub register.
