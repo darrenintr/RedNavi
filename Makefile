@@ -235,6 +235,8 @@ test:
 	./build/navi33_vram_reservation_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_vram_ledger_test.cpp -o build/navi33_vram_ledger_test
 	./build/navi33_vram_ledger_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_allocator_carve_test.cpp -o build/navi33_allocator_carve_test
+	./build/navi33_allocator_carve_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_linux_boot_parity_test.cpp -o build/navi33_linux_boot_parity_test
 	./build/navi33_linux_boot_parity_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/dma_pages_test.cpp -o build/dma_pages_test
