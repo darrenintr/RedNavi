@@ -295,6 +295,10 @@ class RedNaviProbe : public IOService {
     uint32_t navi33FwPriPageCount {0};
     uint64_t navi33FwPriBytes {0};
     bool navi33FwPriPrepared {false};
+    // Set only after P7 has installed these retained pages into live GPU
+    // page tables and completed the VMID0 flush. Until a verified hub/GART
+    // teardown exists, freeing the DMA mapping would leave dangling GPU PTEs.
+    bool navi33P7GartProgrammed {false};
     // P6.5 software-only VRAM reservation. These offsets are bookkeeping
     // claims only; P4 never writes them or exposes them to the GPU.
     bool navi33VramLedgerOwned {false};
@@ -4476,6 +4480,7 @@ bool RedNaviProbe::start(IOService *provider) {
                         rn_gart_prepare_invalidation(&gpu);
                         p7FlushRc = rn_gart_flush(&gpu);
                         p7GartReady = p7FlushRc == 0;
+                        if (p7GartReady) navi33P7GartProgrammed = true;
                     }
                 }
 
@@ -4746,9 +4751,15 @@ void RedNaviProbe::stop(IOService *provider) {
     if (doorbellKeep) { rn_set_doorbell(nullptr, 0); doorbellKeep->release(); doorbellKeep = nullptr; }
     if (!retainDma && hostDma) { hostDma->complete(); hostDma->clearMemoryDescriptor(); hostDma->release(); hostDma = nullptr; }
     if (!retainDma && hostBuf) { hostBuf->release(); hostBuf = nullptr; }
-    // P6.4 never exposes fw_pri to the GPU, so its DMA mapping is always safe
-    // to tear down with the service regardless of the legacy gpuLive state.
-    releaseNavi33FwPriDma();
+    // P6.4 ownership-only probes can be released normally. P7, however,
+    // installs these exact pages into live VMID0/GART PTEs. There is not yet
+    // a native-validated GFXHUB/MMHUB teardown path, so retain the backing
+    // until reboot rather than leave the GPU with dangling system PTEs.
+    if (!navi33P7GartProgrammed) {
+        releaseNavi33FwPriDma();
+    } else {
+        IOLog("RedNavi: P7 GART is live; retaining fw_pri DMA backing until reboot\n");
+    }
     // P6.5 is bookkeeping only; dropping the claim performs no hardware I/O.
     navi33VramLedgerOwned = false;
     navi33VramPtOffset = 0;
