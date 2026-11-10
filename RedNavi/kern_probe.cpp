@@ -858,7 +858,15 @@ bool RedNaviProbe::pspSubmitP7(
     uint8_t *cmd = base + 4096;
     uint8_t *fence = base + 8192;
     memset(cmd, 0, 4096);
-    memset(fence, 0, 4096);
+
+    // Linux clears the PSP fence buffer once before ring initialization,
+    // then leaves the previous fence value in place across submissions.
+    // Preserve that behavior so the next command advances 1 -> 2 rather
+    // than forcing the shared fence back to zero.
+    volatile uint32_t *fenceValue =
+        reinterpret_cast<volatile uint32_t *>(fence);
+    OSSynchronizeIO();
+    p7SubmitFenceBefore = *fenceValue;
 
     *reinterpret_cast<uint32_t *>(cmd + 8) = cmdId;
     for (uint32_t n = 0; n < nargs; ++n)
@@ -869,7 +877,7 @@ bool RedNaviProbe::pspSubmitP7(
     p7SubmitWptrBefore = wptr;
     p7SubmitWptrAfter = wptr;
     p7SubmitFenceExpected = 0;
-    p7SubmitFenceObserved = 0;
+    p7SubmitFenceObserved = p7SubmitFenceBefore;
     p7SubmitPolls = 0;
     if ((wptr & 15u) || wptr >= ringDw) return false;
 
@@ -892,9 +900,7 @@ bool RedNaviProbe::pspSubmitP7(
     wr(r67, nextWptr);
     p7SubmitWptrAfter = rd(r67);
 
-    volatile uint32_t *fenceValue =
-        reinterpret_cast<volatile uint32_t *>(fence);
-    uint32_t observed = 0;
+    uint32_t observed = p7SubmitFenceBefore;
     for (uint32_t ms = 0;
          ms < rn_navi33::p7_pmfw::kFenceTimeoutMs; ++ms) {
         OSSynchronizeIO();
