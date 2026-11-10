@@ -4004,9 +4004,85 @@ bool RedNaviProbe::start(IOService *provider) {
                 const auto stageGeometry = rn_navi33::address::makeGeometry(
                     stageMemory, gfxFbOffsetRaw, gfxFbOffsetRead);
 
-                // P6.3 planning: derive Linux's high 512 MiB GART geometry
-                // from the validated P5 address space, but deliberately supply
-                // no VRAM/DMA ownership yet. No PTE or hub register is written.
+                // P6.4 ownership-only probe. Opt-in allocation of Linux's 1 MiB
+                // PSP fw_pri host backing. IOKit may create/retain DMA IOVAs,
+                // but this path NEVER writes a GPU GART PTE or hub register.
+                uint32_t dmaOwnerArg = 0;
+                const bool dmaOwnerRequested =
+                    gate.status == rn_navi33::p6_psp::Status::NeedsVerifiedFirmware &&
+                    stageGeometry.ok() &&
+                    PE_parse_boot_argn("rednavi_navi33_dma_owner_probe",
+                                       &dmaOwnerArg, sizeof(dmaOwnerArg)) &&
+                    dmaOwnerArg == 1u;
+                uint32_t dmaMappingError = 0;
+                const bool dmaOwnerPrepared =
+                    prepareNavi33FwPriDma(dmaOwnerRequested, &dmaMappingError);
+                const rn_navi33::fw_pri_owner::Input dmaOwnerInput{
+                    dmaOwnerRequested,
+                    navi33FwPriBuf != nullptr,
+                    navi33FwPriDma != nullptr && navi33FwPriPrepared,
+                    dmaOwnerPrepared,
+                    navi33FwPriBytes,
+                    navi33FwPriPageCount
+                };
+                const auto dmaOwner =
+                    rn_navi33::fw_pri_owner::inspect(dmaOwnerInput);
+
+                uint64_t dmaFirst = 0, dmaLast = 0, dmaMin = 0, dmaMax = 0;
+                bool dmaContiguous = false;
+                if (dmaOwner.ownerVerified && navi33FwPriPages &&
+                    navi33FwPriPageCount) {
+                    dmaFirst = navi33FwPriPages[0];
+                    dmaLast = navi33FwPriPages[navi33FwPriPageCount - 1u];
+                    dmaMin = dmaMax = dmaFirst;
+                    dmaContiguous = true;
+                    for (uint32_t p = 0; p < navi33FwPriPageCount; ++p) {
+                        const uint64_t a = navi33FwPriPages[p];
+                        if (a < dmaMin) dmaMin = a;
+                        if (a > dmaMax) dmaMax = a;
+                        if (p && a != navi33FwPriPages[p - 1u] + 4096ull)
+                            dmaContiguous = false;
+                    }
+                }
+                const char *const don[] = {
+                    "error", "requested", "buffer_allocated", "dma_prepared",
+                    "pages_verified", "mapping_error", "bytes", "page_count",
+                    "address_bits", "first_iova_lo", "first_iova_hi",
+                    "last_iova_lo", "last_iova_hi", "min_iova_lo",
+                    "min_iova_hi", "max_iova_lo", "max_iova_hi",
+                    "physically_contiguous_iova", "owner_verified",
+                    "gpu_mapped", "may_install_gart_ptes"
+                };
+                const uint32_t dov[] = {
+                    static_cast<uint32_t>(dmaOwner.error),
+                    static_cast<uint32_t>(dmaOwnerRequested),
+                    static_cast<uint32_t>(navi33FwPriBuf != nullptr),
+                    static_cast<uint32_t>(navi33FwPriDma != nullptr &&
+                                          navi33FwPriPrepared),
+                    static_cast<uint32_t>(dmaOwnerPrepared),
+                    dmaMappingError,
+                    static_cast<uint32_t>(navi33FwPriBytes),
+                    navi33FwPriPageCount,
+                    rn_navi33::fw_pri_owner::kDmaAddressBits,
+                    static_cast<uint32_t>(dmaFirst),
+                    static_cast<uint32_t>(dmaFirst >> 32),
+                    static_cast<uint32_t>(dmaLast),
+                    static_cast<uint32_t>(dmaLast >> 32),
+                    static_cast<uint32_t>(dmaMin),
+                    static_cast<uint32_t>(dmaMin >> 32),
+                    static_cast<uint32_t>(dmaMax),
+                    static_cast<uint32_t>(dmaMax >> 32),
+                    static_cast<uint32_t>(dmaContiguous),
+                    static_cast<uint32_t>(dmaOwner.ownerVerified),
+                    0u,
+                    static_cast<uint32_t>(dmaOwner.mayInstallGartPtes)
+                };
+                rnPublish(this, "navi33-fw-pri-dma-owner", don, dov,
+                          sizeof(dov) / sizeof(dov[0]));
+
+                // P6.3/P6.4 GART plan. The DMA owner above is real software
+                // ownership; VRAM page-table ownership remains deliberately
+                // absent, so this still cannot authorize GART programming.
                 rn_navi33::gart_owner::Input gartInput{};
                 if (stageGeometry.ok()) {
                     gartInput.fbStart = stageGeometry.geometry.mcStart.value;
@@ -4014,6 +4090,10 @@ bool RedNaviProbe::start(IOService *provider) {
                     gartInput.cpuVisibleBytes =
                         stageGeometry.geometry.cpuVisibleBytes;
                 }
+                gartInput.dmaBytes = navi33FwPriBytes;
+                gartInput.dmaPageCount = navi33FwPriPageCount;
+                gartInput.dmaMappingRetained = dmaOwner.ownerVerified;
+                gartInput.dmaPagesVerified = dmaOwner.ownerVerified;
                 const auto gartPlan = rn_navi33::gart_owner::inspect(gartInput);
                 const char *const gon[] = {
                     "error", "gart_start_lo", "gart_start_hi",
@@ -4029,17 +4109,17 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(gartPlan.gartEnd >> 32),
                     static_cast<uint32_t>(gartInput.gartBytes >> 20),
                     static_cast<uint32_t>(gartPlan.pageTableBytes),
-                    0u, 0u,
+                    0u,
+                    static_cast<uint32_t>(dmaOwner.ownerVerified),
                     static_cast<uint32_t>(gartPlan.ownershipVerified),
                     static_cast<uint32_t>(gartPlan.mayProgramGart)
                 };
                 rnPublish(this, "navi33-gart-owner-plan", gon, gov,
                           sizeof(gov) / sizeof(gov[0]));
 
-                // PSP fw_pri is not BAR0 VRAM on the Linux discrete-GPU path:
-                // it is a retained host DMA allocation reached through GART.
-                // Until the owner above is real, this gate must stop before
-                // any firmware copy or PSP mailbox operation.
+                // PSP fw_pri is host DMA memory reached through VMID0/GART.
+                // Firmware provenance and VRAM/GART ownership are still
+                // independent gates, so no firmware is copied here.
                 rn_navi33::p6_staging::Input stageInput{};
                 stageInput.p6PreflightPassed =
                     gate.status == rn_navi33::p6_psp::Status::NeedsVerifiedFirmware;
@@ -4055,9 +4135,9 @@ bool RedNaviProbe::start(IOService *provider) {
                 stageInput.gartEnd = gartPlan.gartEnd;
                 stageInput.fwPriGpuVa = gartPlan.fwPriGpuAddress;
                 stageInput.fwPriBytes = rn_navi33::p6_boot::kStageBytes;
-                stageInput.dmaMappingRetained = false;
-                stageInput.dmaPagesVerified = false;
-                stageInput.dmaBytes = 0;
+                stageInput.dmaMappingRetained = dmaOwner.ownerVerified;
+                stageInput.dmaPagesVerified = dmaOwner.ownerVerified;
+                stageInput.dmaBytes = navi33FwPriBytes;
                 const auto stage = rn_navi33::p6_staging::validate(stageInput);
                 const char *const stn[] = {
                     "error", "p6_ready", "firmware_metadata_verified",
@@ -4071,8 +4151,7 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(stageInput.firmwareMetadataVerified),
                     static_cast<uint32_t>(stageInput.firmwareBytesVerified),
                     static_cast<uint32_t>(stageInput.gartOwnershipVerified),
-                    static_cast<uint32_t>(stageInput.dmaMappingRetained &&
-                                          stageInput.dmaPagesVerified),
+                    static_cast<uint32_t>(dmaOwner.ownerVerified),
                     static_cast<uint32_t>(stage.fwPriGpuVa),
                     static_cast<uint32_t>(stage.fwPriGpuVa >> 32),
                     static_cast<uint32_t>(stageInput.fwPriBytes),
