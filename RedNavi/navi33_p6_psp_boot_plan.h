@@ -18,6 +18,9 @@ constexpr uint8_t kTargetMajor = 13u;
 constexpr uint8_t kTargetMinor = 0u;
 constexpr uint8_t kTargetRevision = 7u;
 constexpr uint32_t kStageBytes = 1u << 20; // Linux PSP_1_MEG
+// Current inspected linux-firmware psp_13_0_7_sos.bin container length.
+// Fail closed if a future firmware revision changes the container.
+constexpr uint32_t kExpectedSourceBytes = 248496u;
 constexpr uint32_t kMaxContainerBytes = 16u << 20;
 
 enum ComponentBit : uint32_t {
