@@ -487,6 +487,94 @@ public:
 
 OSDefineMetaClassAndStructors(RedNaviProbe, IOService)
 
+void RedNaviProbe::releaseNavi33FwPriDma() {
+    if (navi33FwPriDma) {
+        // clearMemoryDescriptor(autoComplete=true) releases the active DMA
+        // mapping created by setMemoryDescriptor(autoPrepare=true).
+        navi33FwPriDma->clearMemoryDescriptor();
+        navi33FwPriDma->release();
+        navi33FwPriDma = nullptr;
+    }
+    if (navi33FwPriPages) {
+        IOFree(navi33FwPriPages,
+               sizeof(uint64_t) * rn_navi33::fw_pri_owner::kPages);
+        navi33FwPriPages = nullptr;
+    }
+    if (navi33FwPriBuf) {
+        navi33FwPriBuf->release();
+        navi33FwPriBuf = nullptr;
+    }
+    navi33FwPriPageCount = 0;
+    navi33FwPriBytes = 0;
+    navi33FwPriPrepared = false;
+}
+
+bool RedNaviProbe::prepareNavi33FwPriDma(bool enabled,
+                                        uint32_t *mappingError) {
+    if (mappingError) *mappingError = 0;
+    if (!enabled) return false;
+    if (navi33FwPriPrepared && navi33FwPriBuf && navi33FwPriDma &&
+        navi33FwPriPages &&
+        navi33FwPriPageCount == rn_navi33::fw_pri_owner::kPages &&
+        navi33FwPriBytes == rn_navi33::fw_pri_owner::kBytes)
+        return true;
+
+    releaseNavi33FwPriDma();
+
+    navi33FwPriBuf = IOBufferMemoryDescriptor::inTaskWithOptions(
+        kernel_task, kIODirectionInOut,
+        rn_navi33::fw_pri_owner::kBytes, 4096);
+    if (!navi33FwPriBuf) return false;
+    void *cpu = navi33FwPriBuf->getBytesNoCopy();
+    if (!cpu) {
+        releaseNavi33FwPriDma();
+        return false;
+    }
+    memset(cpu, 0, rn_navi33::fw_pri_owner::kBytes);
+
+    navi33FwPriDma = IODMACommand::withSpecification(
+        kIODMACommandOutputHost64,
+        rn_navi33::fw_pri_owner::kDmaAddressBits,
+        0, IODMACommand::kMapped,
+        rn_navi33::fw_pri_owner::kBytes, 4096, nullptr, nullptr);
+    if (!navi33FwPriDma ||
+        navi33FwPriDma->setMemoryDescriptor(navi33FwPriBuf) != kIOReturnSuccess) {
+        releaseNavi33FwPriDma();
+        return false;
+    }
+
+    navi33FwPriPages = static_cast<uint64_t *>(
+        IOMalloc(sizeof(uint64_t) * rn_navi33::fw_pri_owner::kPages));
+    if (!navi33FwPriPages) {
+        releaseNavi33FwPriDma();
+        return false;
+    }
+
+    const auto mapping = rn_dma::collectPages<IODMACommand::Segment64>(
+        navi33FwPriPages, rn_navi33::fw_pri_owner::kPages,
+        rn_navi33::fw_pri_owner::kBytes,
+        [this](uint64_t *offset, IODMACommand::Segment64 *segments,
+               uint32_t *count) {
+            UInt64 dmaOffset = *offset;
+            UInt32 dmaCount = *count;
+            const IOReturn rc = navi33FwPriDma->genIOVMSegments(
+                &dmaOffset, segments, &dmaCount);
+            *offset = dmaOffset;
+            *count = dmaCount;
+            return rc == kIOReturnSuccess;
+        });
+    if (!mapping.ok()) {
+        if (mappingError) *mappingError = static_cast<uint32_t>(mapping.error);
+        releaseNavi33FwPriDma();
+        return false;
+    }
+
+    navi33FwPriPageCount = mapping.pageCount;
+    navi33FwPriBytes = mapping.bytes;
+    navi33FwPriPrepared = true;
+    return true;
+}
+
 void RedNaviProbe::dumpPci() {
     uint32_t id = pci->configRead32(0x00);
     uint32_t sub = pci->configRead32(0x2C);
