@@ -4258,11 +4258,11 @@ bool RedNaviProbe::start(IOService *provider) {
                         reservePlan.dummy.offset, reservePlan.dummy.bytes
                     };
                 }
-                // A candidate outside the active boot framebuffer is evidence,
-                // not exclusivity. Keep both ownership gates false until a
-                // later explicit reservation stage proves them.
-                gartInput.vramOwnershipVerified = false;
-                gartInput.reservationMapVerified = false;
+                // P6.5 software ownership is enough to advance the planning
+                // contract, but NOT enough to authorize a hardware write.
+                // gart_owner::Plan::mayProgramGart remains hard false.
+                gartInput.vramOwnershipVerified = navi33VramLedgerOwned;
+                gartInput.reservationMapVerified = navi33VramLedgerOwned;
                 gartInput.dmaBytes = navi33FwPriBytes;
                 gartInput.dmaPageCount = navi33FwPriPageCount;
                 gartInput.dmaMappingRetained = dmaOwner.ownerVerified;
@@ -4285,7 +4285,7 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(gartPlan.pageTableBytes),
                     static_cast<uint32_t>(reservePlan.candidateNonOverlapping),
                     static_cast<uint32_t>(reservePlan.pageTable.offset),
-                    0u,
+                    static_cast<uint32_t>(navi33VramLedgerOwned),
                     static_cast<uint32_t>(dmaOwner.ownerVerified),
                     static_cast<uint32_t>(gartPlan.ownershipVerified),
                     static_cast<uint32_t>(gartPlan.mayProgramGart)
