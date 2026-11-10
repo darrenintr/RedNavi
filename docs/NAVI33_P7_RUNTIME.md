@@ -269,6 +269,75 @@ navi33-p7-postpsp-runtime:
 This encodes Linux's PMFW-centralized C-state ordering: ownership first, then
 PMFW, then SETUP_TMR.
 
+## Step-5 PMFW-only checkpoint
+
+After RX 7600 real hardware validated Step 4 TMR ownership, Step 5 admits
+exactly one additional PSP command: `GFX_CMD_ID_LOAD_IP_FW` for
+`GFX_FW_TYPE_SMU` (18). It deliberately does **not** send SETUP_TMR, does
+not send an SMU mailbox message, and does not load GC/SDMA/MES firmware.
+
+The local PMFW source is `smu_13_0_10.bin`. RedNavi pins the current
+linux-firmware source used for this checkpoint to:
+
+```text
+linux-firmware commit:
+0a6871b19abf5d6e024b5d208b101ae53e7fa0de
+
+smu_13_0_10.bin SHA-256:
+d6c5a9fa211985ab00438955931adff5eaf456794d38b198ce92ff39d283dc26
+```
+
+`tools/gen_smu_fw_header.py` extracts only the common AMD firmware header's
+ucode payload, matching Linux's `AMDGPU_UCODE_ID_SMC` PSP load path. The
+generated header marks its digest trusted only when the supplied expected
+SHA-256 matches exactly.
+
+Step 5 reuses the already-validated 1 MiB `fw_pri` GART mapping as a
+temporary PMFW source:
+
+```text
+fw_pri GPU VA = 0x7fff00000000
+command       = GFX_CMD_ID_LOAD_IP_FW (0x06)
+fw_type       = GFX_FW_TYPE_SMU (18)
+```
+
+A successful Step 5 should publish `navi33-p7-pmfw-runtime` with:
+
+```text
+step = 5
+error = 0
+requested = 1
+psp_ready = 1
+toc_accepted = 1
+tmr_ownership_verified = 1
+firmware_present = 1
+metadata_verified = 1
+digest_trusted = 1
+fence_ok = 1
+status = 0
+accepted = 1
+stage_va = 0x7fff00000000
+may_setup_tmr = 0
+```
+
+The PSP response's `fw_addr_lo/fw_addr_hi` is recorded as evidence but is not
+used as the source address and is not required to match the future TMR
+placement.
+
+After PMFW acceptance, the post-PSP policy should advance from
+`PmfwNotLoaded` to `TmrNotAccepted`:
+
+```text
+navi33-p7-postpsp-runtime:
+  may_load_pmfw = 1
+  may_setup_tmr = 1
+  may_load_ip_fw = 0
+  may_start_mes = 0
+```
+
+`may_setup_tmr=1` is admission for the **next** checkpoint only; Step 5 never
+issues SETUP_TMR.
+
 ## Render-pipeline boundary
 
 For MP0 13.0.7, Linux marks PMFW centralized C-state management as enabled and
