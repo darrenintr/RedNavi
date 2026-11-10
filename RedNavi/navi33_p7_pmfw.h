@@ -7,6 +7,18 @@
 
 namespace rn_navi33 { namespace p7_pmfw {
 
+constexpr uint32_t kStageFirstPage = 259u; // after ring/cmd/fence 256..258
+constexpr uint64_t kStageMaxBytes = 1ull << 20;
+constexpr uint32_t kFenceTimeoutMs = 6000u;
+
+constexpr uint64_t alignPage(uint64_t bytes) {
+    return (bytes + 4095ull) & ~4095ull;
+}
+
+constexpr uint32_t pageCount(uint64_t bytes) {
+    return static_cast<uint32_t>(alignPage(bytes) / 4096ull);
+}
+
 enum class Error : uint8_t {
     Ok = 0,
     Disabled,
@@ -58,7 +70,8 @@ inline Report inspect(const Input &in) {
     if (!in.firmwareBytes) {
         r.error = Error::EmptyFirmware; return r;
     }
-    if (!in.stageBytes || in.firmwareBytes > in.stageBytes) {
+    if (!in.stageBytes || in.stageBytes > kStageMaxBytes ||
+        in.firmwareBytes > in.stageBytes) {
         r.error = Error::FirmwareTooLarge; return r;
     }
     r.mayStage = true;

@@ -295,14 +295,33 @@ ucode payload, matching Linux's `AMDGPU_UCODE_ID_SMC` PSP load path. The
 generated header marks its digest trusted only when the supplied expected
 SHA-256 matches exactly.
 
-Step 5 reuses the already-validated 1 MiB `fw_pri` GART mapping as a
-temporary PMFW source:
+Step 5 uses a **dedicated** GTT-style firmware staging allocation, matching
+Linux's separate `firmware.fw_buf` model. It must not reuse PSP `fw_pri`.
+
+The PMFW payload occupies 64 retained system pages and is mapped immediately
+after the three PSP runtime pages:
 
 ```text
-fw_pri GPU VA = 0x7fff00000000
-command       = GFX_CMD_ID_LOAD_IP_FW (0x06)
-fw_type       = GFX_FW_TYPE_SMU (18)
+fw_pri pages     = 0..255
+PSP ring/cmd/fence = 256..258
+PMFW staging     = 259..322
+PMFW stage VA    = 0x7fff00103000
+command          = GFX_CMD_ID_LOAD_IP_FW (0x06)
+fw_type          = GFX_FW_TYPE_SMU (18)
 ```
+
+Every PMFW staging PTE is read back and MMHUB VMID0 is invalidated before the
+command is submitted.
+
+Real-hardware 0.0.18 testing reached the PMFW command but timed out waiting
+for its fence while LOAD_TOC remained healthy. Two Linux-parity differences
+were identified and corrected in 0.0.19:
+
+1. Linux stages non-PSP firmware in a separate `firmware.fw_buf` GTT
+   allocation, not in PSP `fw_pri`.
+2. Linux initializes `psp_timeout=20000` and polls at roughly 150–300 us,
+   yielding an effective several-second wait. RedNavi previously used a fixed
+   2-second wait; P7.3 now allows 6 seconds and records fence/ring telemetry.
 
 A successful Step 5 should publish `navi33-p7-pmfw-runtime` with:
 
@@ -319,7 +338,17 @@ digest_trusted = 1
 fence_ok = 1
 status = 0
 accepted = 1
-stage_va = 0x7fff00000000
+stage_prepared = 1
+stage_mapped = 1
+stage_page_count = 64
+stage_pte_verified = 1
+stage_bad_pte = 0xffffffff
+stage_mapping_error = 0
+stage_va = 0x7fff00103000
+fence_expected = fence_observed
+fence_ok = 1
+status = 0
+accepted = 1
 may_setup_tmr = 0
 ```
 
