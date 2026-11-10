@@ -366,6 +366,15 @@ GPU TLB, copy PSP firmware or issue a PSP command. The ownership-only
 DMA mapping is released on service stop because P4 0.0.6 never exposes
 it to the GPU.
 
+Native P4 `0.0.6` on 2026-11-10 passed this checkpoint:
+`error=0`, `bytes=1048576`, `page_count=256`,
+`address_bits=44`, `owner_verified=1`, `gpu_mapped=0`.
+The IOVA pages were deliberately non-contiguous: first
+`0x1ea5a0000`, last `0x1ea49f000`, minimum
+`0x1ea400000`, maximum `0x1ea5ff000`.
+This proves the later GART population must consume the saved 256-entry
+page list; it must never derive page N as `first_iova + N*4096`.
+
 Do not add the P4 bundle to the known-good OpenCore EFI. Use only a
 separate, recoverable **test EFI**, and keep the clean boot path
 available. Never co-install the normal RedNavi and P4 bundles; both
@@ -373,23 +382,38 @@ contain `RedNaviProbe` runtime classes. On the sole-display RX7600
 you should also have an independently proven recovery procedure
 before taking this risk.
 
+#### P6.4b boot-framebuffer reservation evidence
+
+P4 `0.0.7` adds a read-only bridge to XNU's `PE_current_console()`.
+It records the current boot framebuffer CPU physical address, BAR0 CPU
+physical base, row bytes, mode dimensions and translated VRAM aperture
+offset. The planner mirrors IONDRVFramebuffer's active-aperture size
+calculation (`bytesPerRow * activeHeight + 128`).
+
+It then proposes, but does not own, a VMID0 GART table candidate at the
+top of the independently proven 256 MiB CPU-visible aperture, with the
+scratch/dummy pages immediately below it. The candidate is accepted only
+if the active boot framebuffer lies inside BAR0 and does not overlap any
+of those three ranges. `reservation_owned` and `may_write_vram`
+remain hard false.
+
 ### Next verified hardware checkpoint
 
-Build P4 0.0.6 without a local PSP header and add only
-`rednavi_navi33_dma_owner_probe=1` to the isolated test EFI.
+Build P4 0.0.7 with the same
+`rednavi_navi33_dma_owner_probe=1` opt-in. Collect
+`navi33-boot-framebuffer`, `navi33-vram-reservation-candidate`,
+`navi33-fw-pri-dma-owner` and `navi33-gart-owner-plan`.
 
-Expected result: `navi33-fw-pri-dma-owner.error=0`,
-`bytes=1048576`, `page_count=256`, `address_bits=44`,
-`owner_verified=1`, but `gpu_mapped=0` and
-`may_install_gart_ptes=0`. The independent GART planner should retain
-the same Linux-high geometry and still stop at
-`error=4 (NoVramOwnership)`, while now reporting `dma_owner=1`.
-P6 staging remains `NoFirmwareProof`.
+Expected: the DMA owner remains verified, the current boot framebuffer
+maps cleanly inside BAR0, and the candidate reports
+`candidate_nonoverlap=1` while `reservation_owned=0`,
+`may_write_vram=0`, GART `vram_owner=0`, and
+`may_program_gart=0`.
 
-Only after that native checkpoint should RedNavi implement the other
-half of P6.4: an explicit VRAM reservation ledger for the 1 MiB VMID0
-PTE table plus scratch/dummy pages. Actual GMC11/GART writes remain a
-later opt-in stage. MES remains later. The historical Cobalt64
+Only after that native evidence should a later explicit stage claim the
+candidate in RedNavi's own reservation ledger. Actual PTE writes,
+GFXHUB/MMHUB programming and PSP commands remain disabled. MES remains
+later. The historical Cobalt64
 compute proof was in a specific RX7600 GPU-passthrough environment;
 its absolute GPU VM/VRAM ownership must be revalidated on bare-metal
 Sequoia.
