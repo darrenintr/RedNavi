@@ -76,7 +76,8 @@ inline Report inspect(const Evidence &e) {
         r.error = Error::MissingSourceDigest;
         return r;
     }
-    if (!e.sourceBytes || e.sourceBytes > kMaxContainerBytes) {
+    if (e.sourceBytes != kExpectedSourceBytes ||
+        e.sourceBytes > kMaxContainerBytes) {
         r.error = Error::BadContainerSize;
         return r;
     }
