@@ -23,10 +23,10 @@ NAMES = [
     "INTF_DRV", "DBG_DRV", "RAS_DRV", "IPKEYMGR_DRV", "SPDM_DRV",
 ]
 ORDER = [
-    ("KDB", 0x80000), ("SPL", 0x00000), ("SYS_DRV", 0x10000),
+    ("KDB", 0x80000), ("SPL", 0x10000000), ("SYS_DRV", 0x10000),
     ("SOC_DRV", 0xB0000), ("INTF_DRV", 0xD0000), ("DBG_DRV", 0xC0000),
-    ("RAS_DRV", 0xE0000), ("IPKEYMGR_DRV", 0x00000),
-    ("SPDM_DRV", 0x00000), ("SOS", 0x20000),
+    ("RAS_DRV", 0xE0000), ("IPKEYMGR_DRV", 0xF0000),
+    ("SPDM_DRV", 0x20000000), ("SOS", 0x20000),
 ]
 BITS = {
     "SOS": 1 << 0,
@@ -61,13 +61,33 @@ def parse(path: Path):
     count = struct.unpack_from("<I", b, 32)[0]
     if count == 0 or count >= 64:
         raise ValueError(f"invalid PSP packed component count {count}")
-    desc_end = 36 + 16 * count
+
+    if minor == 0:
+        desc_start = 36
+        parse_start = 0
+        parse_end = count
+    elif minor == 1:
+        if len(b) < 40:
+            raise ValueError("PSP v2.1 header is truncated")
+        aux_index = struct.unpack_from("<I", b, 36)[0]
+        if aux_index > count:
+            raise ValueError(f"invalid PSP v2.1 aux index {aux_index}")
+        desc_start = 40
+        # Match Linux's normal discrete-GPU path: fw_bin_count -= aux_index.
+        parse_start = 0
+        parse_end = count - aux_index
+        if parse_end == 0:
+            raise ValueError("PSP v2.1 contains no normal boot components")
+    else:
+        raise ValueError(f"unsupported packed PSP header v2.{minor}")
+
+    desc_end = desc_start + 16 * count
     if header_size < desc_end or desc_end > len(b) or uoff > len(b):
         raise ValueError("PSP descriptor table or ucode array is out of bounds")
 
     found = {}
-    for i in range(count):
-        typ, ver, off, size = struct.unpack_from("<IIII", b, 36 + 16 * i)
+    for i in range(parse_start, parse_end):
+        typ, ver, off, size = struct.unpack_from("<IIII", b, desc_start + 16 * i)
         if typ >= len(NAMES):
             continue
         name = NAMES[typ]
@@ -121,9 +141,6 @@ def main(argv=None):
         entries = []
         for name, cmd in ORDER:
             if name not in found:
-                continue
-            # Unknown bootloader command values are deliberately not emitted.
-            if cmd == 0:
                 continue
             ver, data = found[name]
             f.write(f"static const unsigned char kRnFw_{name}[] = {{\n")
