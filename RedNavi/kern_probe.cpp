@@ -3944,7 +3944,10 @@ bool RedNaviProbe::start(IOService *provider) {
                 rn_navi33::p6_staging::Input stageInput{};
                 stageInput.p6PreflightPassed =
                     gate.status == rn_navi33::p6_psp::Status::NeedsVerifiedFirmware;
-                stageInput.firmwareBytesVerified = bootFirmware.metadataVerified;
+                // A recorded SHA-256 is reproducibility metadata, not
+                // provenance proof. Keep bytes untrusted until RedNavi pins
+                // and compares an independently sourced expected digest.
+                stageInput.firmwareBytesVerified = false;
                 stageInput.firmwareMetadataVerified = bootFirmware.metadataVerified;
                 stageInput.maxFirmwareComponentBytes =
                     bootEvidence.maxComponentBytes;
@@ -3959,14 +3962,15 @@ bool RedNaviProbe::start(IOService *provider) {
                 const auto stage = rn_navi33::p6_staging::validate(stageInput);
                 const char *const stn[] = {
                     "error", "p6_ready", "firmware_metadata_verified",
-                    "gart_owner", "dma_owner", "fw_pri_lo", "fw_pri_hi",
-                    "stage_bytes", "may_copy_firmware",
-                    "may_issue_psp_commands"
+                    "firmware_digest_trusted", "gart_owner", "dma_owner",
+                    "fw_pri_lo", "fw_pri_hi", "stage_bytes",
+                    "may_copy_firmware", "may_issue_psp_commands"
                 };
                 const uint32_t stv[] = {
                     static_cast<uint32_t>(stage.error),
                     static_cast<uint32_t>(stageInput.p6PreflightPassed),
                     static_cast<uint32_t>(stageInput.firmwareMetadataVerified),
+                    static_cast<uint32_t>(stageInput.firmwareBytesVerified),
                     static_cast<uint32_t>(stageInput.gartOwnershipVerified),
                     static_cast<uint32_t>(stageInput.dmaMappingRetained &&
                                           stageInput.dmaPagesVerified),
