@@ -14,6 +14,8 @@ static void test_stage_gates() {
     assert(!r.authorizesWrites);
     e.gpuWrittenMarker = e.gpuFenceDone = e.computeReadback = true;
     assert(assess(e).highest == Stage::None);
+    // Restore baseline after proving that later-stage signals cannot bypass P4/P5.
+    e.gpuWrittenMarker = e.gpuFenceDone = e.computeReadback = false;
     e.ipDiscovery = e.p5Memory = e.p6PspPreflight = true;
     assert(assess(e).highest == Stage::Discovery);
     e.signedFirmwareHashes = e.pspResponse = true;
@@ -30,6 +32,7 @@ static void test_stage_gates() {
     assert(assess(e).highest == Stage::Sdma);
     e.gfxQueueMappedReadback = true;
     assert(assess(e).highest == Stage::Mes);
+    e.gpuWrittenMarker = e.computeReadback = true;
     e.gpuFenceDone = false;
     assert(assess(e).highest == Stage::Mes);
     e.gpuFenceDone = true;
