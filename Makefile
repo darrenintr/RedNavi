@@ -204,6 +204,8 @@ test:
 	./build/navi33_address_spaces_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_m4_asic_test.cpp -o build/navi33_m4_asic_test
 	./build/navi33_m4_asic_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_mmhub302_regs_test.cpp -o build/navi33_mmhub302_regs_test
+	./build/navi33_mmhub302_regs_test
 	$(HOST_CXX) -std=c++17 -Wall -DRN_HOST_TEST -Icompat/include tests/host/compat_test.cpp tests/host/host_hooks.cpp \
 		compat/src/rn_slab.cpp compat/src/rn_firmware.cpp compat/src/rn_reg.cpp -o build/compat_test
 	./build/compat_test
