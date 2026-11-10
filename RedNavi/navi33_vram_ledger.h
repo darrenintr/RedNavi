@@ -54,7 +54,7 @@ struct Report {
 };
 
 constexpr bool aligned(uint64_t v, uint64_t a) {
-    return a && !(a & (a - 1u));
+    return a && !(a & (a - 1u)) && !(v & (a - 1u));
 }
 constexpr bool validRange(const Range &r, uint64_t limit) {
     return r.bytes && r.offset <= limit && r.bytes <= limit - r.offset;
