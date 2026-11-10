@@ -323,7 +323,7 @@ void rn_gfxhub_enable(struct rn_device *adev, const struct rn_gmc *gmc) {
     WREG32_SOC15(RN_GC, 0, regGCVM_L2_CONTEXT_IDENTITY_PHYSICAL_OFFSET_HI32, 0);
 }
 
-// mmhub_v3_0_gart_enable (Linux mmhub_v3_0.c), the second memory hub. Linux programs it right after the gfxhub (gmc_v11_0_gart_enable) with the same page table and the same
+// mmhub_v3_0_2_gart_enable (Linux mmhub_v3_0.c), the second memory hub. Linux programs it right after the gfxhub (gmc_v11_0_gart_enable) with the same page table and the same
 // GART range; the MES, the SDMA and the multimedia engines reach memory through it. Until now only the gfxhub knew about the GART window, so an access to host memory from a
 // client of the mmhub had no translation. The registers that Linux fills from compile-time defaults (L2_CNTL3/4/5) are read-modify-written from their reset value here,
 // since the default header is not in the sources used; the fields set are the same ones.
@@ -360,7 +360,9 @@ void rn_mmhub_enable(struct rn_device *adev, const struct rn_gmc *gmc) {
     tmp = REG_SET_FIELD(tmp, MMMC_VM_MX_L1_TLB_CNTL, ECO_BITS, 0);
     tmp = REG_SET_FIELD(tmp, MMMC_VM_MX_L1_TLB_CNTL, MTYPE, 3);              // MTYPE_UC
     WREG32_SOC15(RN_MMHUB, 0, regMMMC_VM_MX_L1_TLB_CNTL, tmp);
-    // init_cache_regs (no translate_further: bank select 9, big-K fragment 6)
+    // mmhub_v3_0_2_init_cache_regs (no translate_further: bank select 9,
+    // big-K fragment 6). Navi33 is MMHUB 3.0.2; these offsets must never be
+    // taken from mmhub_3_0_0_offset.h.
     tmp = RREG32_SOC15(RN_MMHUB, 0, regMMVM_L2_CNTL);
     tmp = REG_SET_FIELD(tmp, MMVM_L2_CNTL, ENABLE_L2_CACHE, 1);
     tmp = REG_SET_FIELD(tmp, MMVM_L2_CNTL, ENABLE_L2_FRAGMENT_PROCESSING, 0);
@@ -374,15 +376,15 @@ void rn_mmhub_enable(struct rn_device *adev, const struct rn_gmc *gmc) {
     tmp = REG_SET_FIELD(tmp, MMVM_L2_CNTL2, INVALIDATE_ALL_L1_TLBS, 1);
     tmp = REG_SET_FIELD(tmp, MMVM_L2_CNTL2, INVALIDATE_L2_CACHE, 1);
     WREG32_SOC15(RN_MMHUB, 0, regMMVM_L2_CNTL2, tmp);
-    tmp = RREG32_SOC15(RN_MMHUB, 0, regMMVM_L2_CNTL3);
+    tmp = 0x80100007u; // regMMVM_L2_CNTL3_DEFAULT in mmhub_v3_0_2.c
     tmp = REG_SET_FIELD(tmp, MMVM_L2_CNTL3, BANK_SELECT, 9);
     tmp = REG_SET_FIELD(tmp, MMVM_L2_CNTL3, L2_CACHE_BIGK_FRAGMENT_SIZE, 6);
     WREG32_SOC15(RN_MMHUB, 0, regMMVM_L2_CNTL3, tmp);
-    tmp = RREG32_SOC15(RN_MMHUB, 0, regMMVM_L2_CNTL4);
+    tmp = 0x000000c1u; // regMMVM_L2_CNTL4_DEFAULT
     tmp = REG_SET_FIELD(tmp, MMVM_L2_CNTL4, VMC_TAP_PDE_REQUEST_PHYSICAL, 0);
     tmp = REG_SET_FIELD(tmp, MMVM_L2_CNTL4, VMC_TAP_PTE_REQUEST_PHYSICAL, 0);
     WREG32_SOC15(RN_MMHUB, 0, regMMVM_L2_CNTL4, tmp);
-    tmp = RREG32_SOC15(RN_MMHUB, 0, regMMVM_L2_CNTL5);
+    tmp = 0x00003fe0u; // regMMVM_L2_CNTL5_DEFAULT
     tmp = REG_SET_FIELD(tmp, MMVM_L2_CNTL5, L2_CACHE_SMALLK_FRAGMENT_SIZE, 0);
     WREG32_SOC15(RN_MMHUB, 0, regMMVM_L2_CNTL5, tmp);
     // enable_system_domain (VMID 0, single level)
