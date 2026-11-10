@@ -106,6 +106,7 @@
 #include "navi33_p6_psp_staging.h"
 #include "navi33_gart_owner.h"
 #include "navi33_fw_pri_dma_owner.h"
+#include "navi33_vram_reservation.h"
 #include "navi33_linux_boot_parity.h"
 #include "navi33_address_spaces.h"
 #include "navi33_m4_asic.h"
