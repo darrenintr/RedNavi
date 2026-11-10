@@ -4012,9 +4012,8 @@ bool RedNaviProbe::start(IOService *provider) {
                 // reservation candidate for the VMID0 GART table.
                 PE_Video consoleInfo {};
                 const bool consoleRead = PE_current_console(&consoleInfo) == 0;
-                IOByteCount barPhysLength = 0;
                 const uint64_t barPhys = aperture ?
-                    aperture->getPhysicalSegment(0, &barPhysLength,
+                    aperture->getPhysicalSegment(0, nullptr,
                                                  kIOMemoryMapperNone) : 0ull;
                 rn_navi33::vram_reservation::Input reserveInput{};
                 reserveInput.barPhys = barPhys;
@@ -4163,6 +4162,22 @@ bool RedNaviProbe::start(IOService *provider) {
                     gartInput.cpuVisibleBytes =
                         stageGeometry.geometry.cpuVisibleBytes;
                 }
+                if (reservePlan.candidateNonOverlapping) {
+                    gartInput.pageTable = {
+                        reservePlan.pageTable.offset, reservePlan.pageTable.bytes
+                    };
+                    gartInput.scratch = {
+                        reservePlan.scratch.offset, reservePlan.scratch.bytes
+                    };
+                    gartInput.dummy = {
+                        reservePlan.dummy.offset, reservePlan.dummy.bytes
+                    };
+                }
+                // A candidate outside the active boot framebuffer is evidence,
+                // not exclusivity. Keep both ownership gates false until a
+                // later explicit reservation stage proves them.
+                gartInput.vramOwnershipVerified = false;
+                gartInput.reservationMapVerified = false;
                 gartInput.dmaBytes = navi33FwPriBytes;
                 gartInput.dmaPageCount = navi33FwPriPageCount;
                 gartInput.dmaMappingRetained = dmaOwner.ownerVerified;
@@ -4171,7 +4186,8 @@ bool RedNaviProbe::start(IOService *provider) {
                 const char *const gon[] = {
                     "error", "gart_start_lo", "gart_start_hi",
                     "gart_end_lo", "gart_end_hi", "gart_mib",
-                    "page_table_bytes", "vram_owner", "dma_owner",
+                    "page_table_bytes", "reservation_candidate",
+                    "candidate_pt_offset", "vram_owner", "dma_owner",
                     "ownership_verified", "may_program_gart"
                 };
                 const uint32_t gov[] = {
@@ -4182,6 +4198,8 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(gartPlan.gartEnd >> 32),
                     static_cast<uint32_t>(gartInput.gartBytes >> 20),
                     static_cast<uint32_t>(gartPlan.pageTableBytes),
+                    static_cast<uint32_t>(reservePlan.candidateNonOverlapping),
+                    static_cast<uint32_t>(reservePlan.pageTable.offset),
                     0u,
                     static_cast<uint32_t>(dmaOwner.ownerVerified),
                     static_cast<uint32_t>(gartPlan.ownershipVerified),
