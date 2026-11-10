@@ -4608,7 +4608,8 @@ bool RedNaviProbe::start(IOService *provider) {
                 uint32_t p7StepArg = 0;
                 PE_parse_boot_argn("rednavi_navi33_p7_step",
                                    &p7StepArg, sizeof(p7StepArg));
-                if (p7StepArg > 3u) p7StepArg = 0u;
+                p7StepArg =
+                    rn_navi33::p7_runtime::sanitizeStep(p7StepArg);
 
                 rn_navi33::p7_runtime::Input p7Input{};
                 p7Input.step = p7StepArg;
