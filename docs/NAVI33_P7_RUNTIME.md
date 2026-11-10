@@ -284,6 +284,9 @@ linux-firmware commit:
 0a6871b19abf5d6e024b5d208b101ae53e7fa0de
 
 smu_13_0_10.bin SHA-256:
+9376ae64149e6b0b684898ffbc12c2230f8c50a2e9447dc7dafc95c0c16b5227
+
+Reference-manifest BLAKE2b-256:
 d6c5a9fa211985ab00438955931adff5eaf456794d38b198ce92ff39d283dc26
 ```
 
