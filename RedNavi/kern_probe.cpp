@@ -4005,6 +4005,78 @@ bool RedNaviProbe::start(IOService *provider) {
                 const auto stageGeometry = rn_navi33::address::makeGeometry(
                     stageMemory, gfxFbOffsetRaw, gfxFbOffsetRead);
 
+                // P6.4b read-only boot-framebuffer evidence. PE_current_console()
+                // is XNU's current console description; on x86_64 its base is
+                // the physical framebuffer address. Translate it into a BAR0
+                // aperture offset, then compute (but do not claim) a VRAM
+                // reservation candidate for the VMID0 GART table.
+                PE_Video consoleInfo {};
+                const bool consoleRead = PE_current_console(&consoleInfo) == 0;
+                IOByteCount barPhysLength = 0;
+                const uint64_t barPhys = aperture ?
+                    aperture->getPhysicalSegment(0, &barPhysLength,
+                                                 kIOMemoryMapperNone) : 0ull;
+                rn_navi33::vram_reservation::Input reserveInput{};
+                reserveInput.barPhys = barPhys;
+                reserveInput.barBytes = bar0Bytes;
+                reserveInput.cpuVisibleBytes =
+                    stageGeometry.ok() ? stageGeometry.geometry.cpuVisibleBytes : 0ull;
+                if (consoleRead) {
+                    reserveInput.consolePhys =
+                        static_cast<uint64_t>(consoleInfo.v_baseAddr);
+                    reserveInput.consoleRowBytes =
+                        static_cast<uint64_t>(consoleInfo.v_rowBytes);
+                    reserveInput.consoleHeight =
+                        static_cast<uint32_t>(consoleInfo.v_height);
+                }
+                const auto reservePlan =
+                    rn_navi33::vram_reservation::inspect(reserveInput);
+
+                const char *const fbn[] = {
+                    "error", "console_read", "bar_phys_lo", "bar_phys_hi",
+                    "bar_bytes", "console_phys_lo", "console_phys_hi",
+                    "row_bytes", "width", "height", "depth",
+                    "console_offset_lo", "console_offset_hi",
+                    "console_bytes", "inside_bar"
+                };
+                const uint32_t fbv[] = {
+                    static_cast<uint32_t>(reservePlan.error),
+                    static_cast<uint32_t>(consoleRead),
+                    static_cast<uint32_t>(barPhys),
+                    static_cast<uint32_t>(barPhys >> 32),
+                    static_cast<uint32_t>(bar0Bytes),
+                    static_cast<uint32_t>(reserveInput.consolePhys),
+                    static_cast<uint32_t>(reserveInput.consolePhys >> 32),
+                    static_cast<uint32_t>(reserveInput.consoleRowBytes),
+                    static_cast<uint32_t>(consoleInfo.v_width),
+                    static_cast<uint32_t>(consoleInfo.v_height),
+                    static_cast<uint32_t>(consoleInfo.v_depth),
+                    static_cast<uint32_t>(reservePlan.console.offset),
+                    static_cast<uint32_t>(reservePlan.console.offset >> 32),
+                    static_cast<uint32_t>(reservePlan.consoleBytes),
+                    static_cast<uint32_t>(reservePlan.consoleInsideBar)
+                };
+                rnPublish(this, "navi33-boot-framebuffer", fbn, fbv,
+                          sizeof(fbv) / sizeof(fbv[0]));
+
+                const char *const vrn[] = {
+                    "error", "page_table_offset", "page_table_bytes",
+                    "scratch_offset", "dummy_offset", "candidate_nonoverlap",
+                    "reservation_owned", "may_write_vram"
+                };
+                const uint32_t vrv[] = {
+                    static_cast<uint32_t>(reservePlan.error),
+                    static_cast<uint32_t>(reservePlan.pageTable.offset),
+                    static_cast<uint32_t>(reservePlan.pageTable.bytes),
+                    static_cast<uint32_t>(reservePlan.scratch.offset),
+                    static_cast<uint32_t>(reservePlan.dummy.offset),
+                    static_cast<uint32_t>(reservePlan.candidateNonOverlapping),
+                    static_cast<uint32_t>(reservePlan.reservationOwned),
+                    static_cast<uint32_t>(reservePlan.mayWriteVram)
+                };
+                rnPublish(this, "navi33-vram-reservation-candidate", vrn, vrv,
+                          sizeof(vrv) / sizeof(vrv[0]));
+
                 // P6.4 ownership-only probe. Opt-in allocation of Linux's 1 MiB
                 // PSP fw_pri host backing. IOKit may create/retain DMA IOVAs,
                 // but this path NEVER writes a GPU GART PTE or hub register.
