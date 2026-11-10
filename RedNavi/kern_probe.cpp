@@ -4087,6 +4087,80 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-vram-reservation-candidate", vrn, vrv,
                           sizeof(vrv) / sizeof(vrv[0]));
 
+                // P6.5: software-only ownership ledger. This claims the
+                // candidate inside RedNavi's bookkeeping, but does not touch
+                // VRAM or authorize any GART/PTE operation.
+                uint32_t vramOwnerArg = 0;
+                const bool vramOwnerRequested =
+                    stageGeometry.ok() &&
+                    reservePlan.candidateNonOverlapping &&
+                    PE_parse_boot_argn("rednavi_navi33_vram_owner_probe",
+                                       &vramOwnerArg, sizeof(vramOwnerArg)) &&
+                    vramOwnerArg == 1u;
+                rn_navi33::vram_ledger::Input ledgerInput{};
+                ledgerInput.requested = vramOwnerRequested;
+                ledgerInput.geometryVerified = stageGeometry.ok();
+                ledgerInput.consoleVerified =
+                    reservePlan.error == rn_navi33::vram_reservation::Error::Ok &&
+                    reservePlan.consoleInsideBar &&
+                    reservePlan.consolePhysicalEncoded;
+                ledgerInput.allocatorInactive = !gpuLive && !vmReady;
+                ledgerInput.cpuVisibleBytes =
+                    stageGeometry.ok() ? stageGeometry.geometry.cpuVisibleBytes : 0ull;
+                ledgerInput.console = {
+                    reservePlan.console.offset, reservePlan.console.bytes
+                };
+                ledgerInput.pageTable = {
+                    reservePlan.pageTable.offset, reservePlan.pageTable.bytes
+                };
+                ledgerInput.scratch = {
+                    reservePlan.scratch.offset, reservePlan.scratch.bytes
+                };
+                ledgerInput.dummy = {
+                    reservePlan.dummy.offset, reservePlan.dummy.bytes
+                };
+                const auto ledger =
+                    rn_navi33::vram_ledger::inspect(ledgerInput);
+
+                if (ledger.ledgerOwned) {
+                    navi33VramLedgerOwned = true;
+                    navi33VramPtOffset = reservePlan.pageTable.offset;
+                    navi33VramScratchOffset = reservePlan.scratch.offset;
+                    navi33VramDummyOffset = reservePlan.dummy.offset;
+                } else if (vramOwnerRequested) {
+                    navi33VramLedgerOwned = false;
+                    navi33VramPtOffset = 0;
+                    navi33VramScratchOffset = 0;
+                    navi33VramDummyOffset = 0;
+                }
+
+                const char *const vln[] = {
+                    "error", "requested", "geometry_verified",
+                    "console_verified", "allocator_inactive",
+                    "page_table_offset", "page_table_bytes",
+                    "scratch_offset", "dummy_offset", "reserved_bytes",
+                    "ledger_owned", "allocator_carve_required",
+                    "may_write_vram", "may_install_gart_ptes"
+                };
+                const uint32_t vlv[] = {
+                    static_cast<uint32_t>(ledger.error),
+                    static_cast<uint32_t>(vramOwnerRequested),
+                    static_cast<uint32_t>(ledgerInput.geometryVerified),
+                    static_cast<uint32_t>(ledgerInput.consoleVerified),
+                    static_cast<uint32_t>(ledgerInput.allocatorInactive),
+                    static_cast<uint32_t>(navi33VramPtOffset),
+                    static_cast<uint32_t>(reservePlan.pageTable.bytes),
+                    static_cast<uint32_t>(navi33VramScratchOffset),
+                    static_cast<uint32_t>(navi33VramDummyOffset),
+                    static_cast<uint32_t>(ledger.reservedBytes),
+                    static_cast<uint32_t>(navi33VramLedgerOwned),
+                    static_cast<uint32_t>(ledger.allocatorCarveRequired),
+                    static_cast<uint32_t>(ledger.mayWriteVram),
+                    static_cast<uint32_t>(ledger.mayInstallGartPtes)
+                };
+                rnPublish(this, "navi33-vram-reservation-ledger", vln, vlv,
+                          sizeof(vlv) / sizeof(vlv[0]));
+
                 // P6.4 ownership-only probe. Opt-in allocation of Linux's 1 MiB
                 // PSP fw_pri host backing. IOKit may create/retain DMA IOVAs,
                 // but this path NEVER writes a GPU GART PTE or hub register.
