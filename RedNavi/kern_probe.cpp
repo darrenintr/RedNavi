@@ -864,6 +864,11 @@ bool RedNaviProbe::pspSubmitP7(
 
     const uint32_t ringDw = kRNPspRingSize / 4;
     const uint32_t wptr = rd(r67);
+    p7SubmitWptrBefore = wptr;
+    p7SubmitWptrAfter = wptr;
+    p7SubmitFenceExpected = 0;
+    p7SubmitFenceObserved = 0;
+    p7SubmitPolls = 0;
     if ((wptr & 15u) || wptr >= ringDw) return false;
 
     uint8_t *frame = ring + static_cast<uint64_t>(wptr) * 4;
@@ -877,16 +882,23 @@ bool RedNaviProbe::pspSubmitP7(
     *reinterpret_cast<uint32_t *>(frame + 16) =
         static_cast<uint32_t>(fenceGpuVa >> 32);
     const uint32_t index = ++pspFence;
+    p7SubmitFenceExpected = index;
     *reinterpret_cast<uint32_t *>(frame + 20) = index;
     OSSynchronizeIO();
-    wr(r67, (wptr + 16u) % ringDw);
+
+    const uint32_t nextWptr = (wptr + 16u) % ringDw;
+    wr(r67, nextWptr);
+    p7SubmitWptrAfter = rd(r67);
 
     volatile uint32_t *fenceValue =
         reinterpret_cast<volatile uint32_t *>(fence);
     uint32_t observed = 0;
-    for (uint32_t ms = 0; ms < 2000u; ++ms) {
+    for (uint32_t ms = 0;
+         ms < rn_navi33::p7_pmfw::kFenceTimeoutMs; ++ms) {
         OSSynchronizeIO();
         observed = *fenceValue;
+        p7SubmitFenceObserved = observed;
+        p7SubmitPolls = ms + 1u;
         if (observed == index) break;
         IOSleep(1);
     }
