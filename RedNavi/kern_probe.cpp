@@ -107,6 +107,7 @@
 #include "navi33_gart_owner.h"
 #include "navi33_fw_pri_dma_owner.h"
 #include "navi33_vram_reservation.h"
+#include "navi33_vram_ledger.h"
 #include "navi33_linux_boot_parity.h"
 #include "navi33_address_spaces.h"
 #include "navi33_m4_asic.h"
@@ -292,6 +293,12 @@ class RedNaviProbe : public IOService {
     uint32_t navi33FwPriPageCount {0};
     uint64_t navi33FwPriBytes {0};
     bool navi33FwPriPrepared {false};
+    // P6.5 software-only VRAM reservation. These offsets are bookkeeping
+    // claims only; P4 never writes them or exposes them to the GPU.
+    bool navi33VramLedgerOwned {false};
+    uint64_t navi33VramPtOffset {0};
+    uint64_t navi33VramScratchOffset {0};
+    uint64_t navi33VramDummyOffset {0};
     // Buffer objects: pages of host memory with an address in the GART window that is never reused (see docs/COMPAT.md on remapping).
     // gpuVa: the buffer's address in the GART window (0 for a buffer that is not mapped there); bus: the bus address of each of its 4 KB pages, from which the user address spaces get their PTEs.
     // A VRAM buffer has no md/dma/bus: vramOff is its offset in VRAM (physically contiguous, 4 KB aligned), dom is RN_BO_VRAM or RN_BO_VRAM_VISIBLE, and a visible one has vmd, the
