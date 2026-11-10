@@ -104,6 +104,7 @@
 #include "navi33_p6_psp_preflight.h"
 #include "navi33_p6_psp_boot_plan.h"
 #include "navi33_p6_psp_staging.h"
+#include "navi33_gart_owner.h"
 #include "navi33_linux_boot_parity.h"
 #include "navi33_address_spaces.h"
 #include "navi33_m4_asic.h"
@@ -3938,6 +3939,38 @@ bool RedNaviProbe::start(IOService *provider) {
                 };
                 rnPublish(this, "navi33-p6-staging", stn, stv,
                           sizeof(stv) / sizeof(stv[0]));
+
+                // P6.3 planning: derive Linux's high 512 MiB GART geometry
+                // from the validated P5 address space, but deliberately supply
+                // no VRAM/DMA ownership yet. No PTE or hub register is written.
+                rn_navi33::gart_owner::Input gartInput{};
+                if (stageGeometry.ok()) {
+                    gartInput.fbStart = stageGeometry.geometry.mcStart.value;
+                    gartInput.fbBytes = stageGeometry.geometry.usableVramBytes;
+                    gartInput.cpuVisibleBytes =
+                        stageGeometry.geometry.cpuVisibleBytes;
+                }
+                const auto gartPlan = rn_navi33::gart_owner::inspect(gartInput);
+                const char *const gon[] = {
+                    "error", "gart_start_lo", "gart_start_hi",
+                    "gart_end_lo", "gart_end_hi", "gart_mib",
+                    "page_table_bytes", "vram_owner", "dma_owner",
+                    "ownership_verified", "may_program_gart"
+                };
+                const uint32_t gov[] = {
+                    static_cast<uint32_t>(gartPlan.error),
+                    static_cast<uint32_t>(gartPlan.gartStart),
+                    static_cast<uint32_t>(gartPlan.gartStart >> 32),
+                    static_cast<uint32_t>(gartPlan.gartEnd),
+                    static_cast<uint32_t>(gartPlan.gartEnd >> 32),
+                    static_cast<uint32_t>(gartInput.gartBytes >> 20),
+                    static_cast<uint32_t>(gartPlan.pageTableBytes),
+                    0u, 0u,
+                    static_cast<uint32_t>(gartPlan.ownershipVerified),
+                    static_cast<uint32_t>(gartPlan.mayProgramGart)
+                };
+                rnPublish(this, "navi33-gart-owner-plan", gon, gov,
+                          sizeof(gov) / sizeof(gov[0]));
 
                 // Linux GC11.0.2 boot-parity preflight. This is a read-only
                 // status report; it does not substitute for a real PSP,
