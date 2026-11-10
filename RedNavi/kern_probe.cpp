@@ -4473,6 +4473,7 @@ bool RedNaviProbe::start(IOService *provider) {
                     if (p7PteVerified) {
                         rn_gfxhub_enable(&gpu, &p7Gmc);
                         rn_mmhub_enable(&gpu, &p7Gmc);
+                        rn_gart_prepare_invalidation(&gpu);
                         p7FlushRc = rn_gart_flush(&gpu);
                         p7GartReady = p7FlushRc == 0;
                     }
