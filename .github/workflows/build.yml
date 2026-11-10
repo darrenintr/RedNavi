@@ -25,6 +25,9 @@ jobs:
       - name: Compile firmware-enabled native call sites (no firmware linked)
         run: |
           if [ "${{ matrix.config }}" = "Debug" ]; then make DEBUG=1 check-kernel-firmware; else make check-kernel-firmware; fi
+      - name: Compile PSP firmware-enabled P7/P7.1 path (declaration-only fixture)
+        run: |
+          if [ "${{ matrix.config }}" = "Debug" ]; then make DEBUG=1 check-kernel-psp-firmware; else make check-kernel-psp-firmware; fi
       - name: Host tests (compat layer)
         if: matrix.config == 'Release'
         run: make test
