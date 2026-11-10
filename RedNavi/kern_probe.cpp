@@ -4021,7 +4021,7 @@ bool RedNaviProbe::start(IOService *provider) {
                 reserveInput.cpuVisibleBytes =
                     stageGeometry.ok() ? stageGeometry.geometry.cpuVisibleBytes : 0ull;
                 if (consoleRead) {
-                    reserveInput.consolePhys =
+                    reserveInput.consoleRawAddress =
                         static_cast<uint64_t>(consoleInfo.v_baseAddr);
                     reserveInput.consoleRowBytes =
                         static_cast<uint64_t>(consoleInfo.v_rowBytes);
@@ -4033,8 +4033,9 @@ bool RedNaviProbe::start(IOService *provider) {
 
                 const char *const fbn[] = {
                     "error", "console_read", "bar_phys_lo", "bar_phys_hi",
-                    "bar_bytes", "console_phys_lo", "console_phys_hi",
-                    "row_bytes", "width", "height", "depth",
+                    "bar_bytes", "console_raw_lo", "console_raw_hi",
+                    "console_phys_lo", "console_phys_hi",
+                    "physical_encoded", "row_bytes", "width", "height", "depth",
                     "console_offset_lo", "console_offset_hi",
                     "console_bytes", "inside_bar"
                 };
@@ -4044,8 +4045,11 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(barPhys),
                     static_cast<uint32_t>(barPhys >> 32),
                     static_cast<uint32_t>(bar0Bytes),
-                    static_cast<uint32_t>(reserveInput.consolePhys),
-                    static_cast<uint32_t>(reserveInput.consolePhys >> 32),
+                    static_cast<uint32_t>(reserveInput.consoleRawAddress),
+                    static_cast<uint32_t>(reserveInput.consoleRawAddress >> 32),
+                    static_cast<uint32_t>(reservePlan.consolePhys),
+                    static_cast<uint32_t>(reservePlan.consolePhys >> 32),
+                    static_cast<uint32_t>(reservePlan.consolePhysicalEncoded),
                     static_cast<uint32_t>(reserveInput.consoleRowBytes),
                     static_cast<uint32_t>(consoleInfo.v_width),
                     static_cast<uint32_t>(consoleInfo.v_height),
