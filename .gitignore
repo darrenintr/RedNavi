@@ -23,3 +23,6 @@ RedNavi/navi33_gc_me_fw.h
 
 # Pinned GC11.0.2 MEC GFX2.0 local firmware header (do not distribute).
 RedNavi/navi33_gc_mec_fw.h
+
+# Locally generated proprietary RLC-G firmware; never commit.
+RedNavi/navi33_gc_rlc_fw.h
