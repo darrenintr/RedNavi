@@ -26,3 +26,6 @@ RedNavi/navi33_gc_mec_fw.h
 
 # Locally generated proprietary RLC-G firmware; never commit.
 RedNavi/navi33_gc_rlc_fw.h
+
+# Generated binary-derived IMU vendor firmware: never commit.
+RedNavi/navi33_gc_imu_fw.h
