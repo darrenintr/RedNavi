@@ -36,6 +36,10 @@ endif
 ifneq ($(wildcard RedNavi/navi33_sdma_fw.h),)
 CXXFLAGS += -DRN_HAVE_NAVI33_SDMA_FW
 endif
+# Git-blob-pinned Navi33 GC11.0.2 RS64 PFP instructions only.
+ifneq ($(wildcard RedNavi/navi33_gc_pfp_fw.h),)
+CXXFLAGS += -DRN_HAVE_NAVI33_GC_PFP_FW
+endif
 ifneq ($(wildcard RedNavi/gc_fw.h),)
 CXXFLAGS += -DRN_HAVE_GC_FW
 endif
@@ -255,6 +259,8 @@ test:
 	./build/navi33_p75_sdma_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p76_sdma_th1_test.cpp -o build/navi33_p76_sdma_th1_test
 	./build/navi33_p76_sdma_th1_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p77_gc_pfp_test.cpp -o build/navi33_p77_gc_pfp_test
+	./build/navi33_p77_gc_pfp_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p7_pmfw_test.cpp -o build/navi33_p7_pmfw_test
 	./build/navi33_p7_pmfw_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_linux_boot_parity_test.cpp -o build/navi33_linux_boot_parity_test
@@ -275,6 +281,7 @@ test:
 	python3 -m unittest discover -s tests/host -p 'navi33_p6_firmware_generator_test.py'
 	python3 -m unittest discover -s tests/host -p 'navi33_smu_firmware_generator_test.py'
 	python3 -m unittest discover -s tests/host -p 'navi33_sdma_firmware_generator_test.py'
+	python3 -m unittest discover -s tests/host -p 'navi33_gc_pfp_firmware_generator_test.py'
 
 # Exercise optional firmware call sites without embedding or linking any firmware.
 # The declaration-only fixture is visible exclusively to this syntax check.
@@ -282,6 +289,6 @@ check-kernel-firmware:
 	$(CXX) $(CXXFLAGS) -DRN_HAVE_GC_FW -DRN_COMPILE_ONLY_FIRMWARE -Itests/compile -fsyntax-only RedNavi/kern_probe.cpp
 
 check-kernel-psp-firmware:
-	$(CXX) $(CXXFLAGS) -DRN_HAVE_PSP_FW -DRN_HAVE_SMU_FW -DRN_HAVE_NAVI33_SDMA_FW -Itests/compile -fsyntax-only RedNavi/kern_probe.cpp
+	$(CXX) $(CXXFLAGS) -DRN_HAVE_PSP_FW -DRN_HAVE_SMU_FW -DRN_HAVE_NAVI33_SDMA_FW -DRN_HAVE_NAVI33_GC_PFP_FW -Itests/compile -fsyntax-only RedNavi/kern_probe.cpp
 
 .PHONY: all clean test mtl diag navi33-p4 check-kernel-firmware check-kernel-psp-firmware
