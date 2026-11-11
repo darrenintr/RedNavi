@@ -78,6 +78,7 @@ class Navi33GcMeTests(unittest.TestCase):
                 self.assertIn("kRNNavi33GcMeCodeBytes 174992u", output)
                 self.assertIn("kRNNavi33GcMeDataBytes 139264u", output)
                 self.assertIn("static const unsigned char kRNNavi33GcMeCodeFw[]", output)
+                self.assertIn("static const unsigned char kRNNavi33GcMeDataFw[]", output)
         finally:
             GEN.REVIEWED_GIT_BLOB_SHA1 = saved
 
@@ -112,6 +113,12 @@ class Navi33GcMeTests(unittest.TestCase):
     def test_excessive_code_rejected(self):
         b = bytearray(synthetic_source())
         struct.pack_into("<I", b, 36, GEN.MAX_STAGING_BYTES+4096)
+        with self.assertRaises(ValueError):
+            GEN.parse_image(b)
+
+    def test_excessive_data_rejected(self):
+        b = bytearray(synthetic_source())
+        struct.pack_into("<I", b, 44, GEN.MAX_STAGING_BYTES+4096)
         with self.assertRaises(ValueError):
             GEN.parse_image(b)
 

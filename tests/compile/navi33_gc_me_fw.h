@@ -14,3 +14,4 @@
 static const char kRNNavi33GcMeSourceSha256[] = "fixture-not-trusted";
 static const char kRNNavi33GcMeSourceGitBlobSha1[] = "fixture-not-trusted";
 static const unsigned char kRNNavi33GcMeCodeFw[16] = {};
+static const unsigned char kRNNavi33GcMeDataFw[16] = {};
