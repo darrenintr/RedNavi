@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include "navi33_p711_gc_me_p0.h"
 #include <cassert>
-using namespace rn_navi33::p710_gc_me;
+using namespace rn_navi33::p711_gc_me_p0;
 
 static Input ready() {
     Input in{};
