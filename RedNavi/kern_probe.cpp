@@ -7802,17 +7802,17 @@ bool RedNaviProbe::start(IOService *provider) {
                           sizeof(p715Values) / sizeof(p715Values[0]));
                 // P7.16: GC11.0.2 RS64 MEC P2_STACK data microcode.
                 // Linux uses the SAME 139264B pinned MEC GFX v2.0 data
-                // segment for P0 and P1. Different PSP types (94 vs 95).
+                // segment for P1 and P2. Distinct PSP types (95 vs 96).
                 // This fifteenth PSP LOAD_IP_FW(type96) requires prior
                 // P1 accepted at fence14. No engine/queue startup.
                 uint32_t p716OptInRaw = 0u;
                 const bool p716OptIn =
                     PE_parse_boot_argn(
-                        "rednavi_navi33_p716_mec_p1",
+                        "rednavi_navi33_p716_mec_p2",
                         &p716OptInRaw, sizeof(p716OptInRaw)) &&
                     p716OptInRaw == 1u;
-                rn_navi33::p716_gc_mec_p1::Input p716Input{};
-                p716Input.requested = p7StepArg >= 17u;
+                rn_navi33::p716_gc_mec_p2::Input p716Input{};
+                p716Input.requested = p7StepArg >= 18u;
                 p716Input.explicitOptIn = p716OptIn;
                 p716Input.identityVerified = p715Input.identityVerified;
                 p716Input.observedGcMajor = p715Input.observedGcMajor;
@@ -7863,7 +7863,7 @@ bool RedNaviProbe::start(IOService *provider) {
                 p716Input.firmwareBytes = kRNNavi33GcMecDataBytes;
 #endif
                 const auto p716Gate =
-                    rn_navi33::p716_gc_mec_p1::inspect(p716Input);
+                    rn_navi33::p716_gc_mec_p2::inspect(p716Input);
 
                 bool p716FenceOk = false;
                 bool p716Submitted = false;
@@ -7881,7 +7881,7 @@ bool RedNaviProbe::start(IOService *provider) {
 
 #ifdef RN_HAVE_NAVI33_GC_MEC_FW
                 if (p716Gate.mayLoad &&
-                    pspFence == rn_navi33::p716_gc_mec_p1::kPriorFence &&
+                    pspFence == rn_navi33::p716_gc_mec_p2::kPriorFence &&
                     !p7SubmitTransportQuarantined &&
                     navi33PmfwBuf && navi33PmfwBuf->getBytesNoCopy() &&
                     sizeof(kRNNavi33GcMecDataFw) ==
@@ -7903,9 +7903,9 @@ bool RedNaviProbe::start(IOService *provider) {
                     };
                     p716FenceOk = pspSubmitP7(
                         p71RingGpuVa, p71CmdGpuVa, p71FenceGpuVa,
-                        rn_navi33::p716_gc_mec_p1::kCommandId,
+                        rn_navi33::p716_gc_mec_p2::kCommandId,
                         p716Gate.words,
-                        rn_navi33::p716_gc_mec_p1::kArgumentCount,
+                        rn_navi33::p716_gc_mec_p2::kArgumentCount,
                         resp, 4u);
                     p716Submitted = p7SubmitWasIssued;
                     p716ResponseValid = p7SubmitResponseValid;
@@ -7928,9 +7928,9 @@ bool RedNaviProbe::start(IOService *provider) {
                     p716Accepted = p716FenceOk && p716ResponseValid &&
                         p716Status == 0u &&
                         p716FenceExpected ==
-                            rn_navi33::p716_gc_mec_p1::kExpectedFence &&
+                            rn_navi33::p716_gc_mec_p2::kExpectedFence &&
                         p716FenceObserved ==
-                            rn_navi33::p716_gc_mec_p1::kExpectedFence;
+                            rn_navi33::p716_gc_mec_p2::kExpectedFence;
                 } else if (p716Gate.mayLoad) {
                     p716TransportError = 10u;
                 }
@@ -7975,8 +7975,8 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(p716Input.stagePteVerified),
                     static_cast<uint32_t>(p716Input.stageGpuVa),
                     static_cast<uint32_t>(p716Input.stageGpuVa >> 32),
-                    rn_navi33::p716_gc_mec_p1::kCommandId,
-                    rn_navi33::p716_gc_mec_p1::kFirmwareType,
+                    rn_navi33::p716_gc_mec_p2::kCommandId,
+                    rn_navi33::p716_gc_mec_p2::kFirmwareType,
                     p716Input.previousFenceExpected,
                     p716Input.previousFenceObserved,
                     static_cast<uint32_t>(p77Accepted),
@@ -8004,22 +8004,22 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(p716Accepted),
                     0u
                 };
-                rnPublish(this, "navi33-p7-gc-mec-p1-runtime",
+                rnPublish(this, "navi33-p7-gc-mec-p2-runtime",
                           p716Names, p716Values,
                           sizeof(p716Values) / sizeof(p716Values[0]));
                 // P7.17: GC11.0.2 RS64 MEC P3_STACK data microcode.
                 // Linux uses the SAME 139264B pinned MEC GFX v2.0 data
-                // segment for P0 and P1. Different PSP types (94 vs 95).
+                // segment for P2 and P3. Distinct PSP types (96 vs 97).
                 // This sixteenth PSP LOAD_IP_FW(type97) requires prior
                 // P2 accepted at fence15. No engine/queue startup.
                 uint32_t p717OptInRaw = 0u;
                 const bool p717OptIn =
                     PE_parse_boot_argn(
-                        "rednavi_navi33_p717_mec_p1",
+                        "rednavi_navi33_p717_mec_p3",
                         &p717OptInRaw, sizeof(p717OptInRaw)) &&
                     p717OptInRaw == 1u;
-                rn_navi33::p717_gc_mec_p1::Input p717Input{};
-                p717Input.requested = p7StepArg >= 17u;
+                rn_navi33::p717_gc_mec_p3::Input p717Input{};
+                p717Input.requested = p7StepArg >= 19u;
                 p717Input.explicitOptIn = p717OptIn;
                 p717Input.identityVerified = p716Input.identityVerified;
                 p717Input.observedGcMajor = p716Input.observedGcMajor;
@@ -8070,7 +8070,7 @@ bool RedNaviProbe::start(IOService *provider) {
                 p717Input.firmwareBytes = kRNNavi33GcMecDataBytes;
 #endif
                 const auto p717Gate =
-                    rn_navi33::p717_gc_mec_p1::inspect(p717Input);
+                    rn_navi33::p717_gc_mec_p3::inspect(p717Input);
 
                 bool p717FenceOk = false;
                 bool p717Submitted = false;
@@ -8088,7 +8088,7 @@ bool RedNaviProbe::start(IOService *provider) {
 
 #ifdef RN_HAVE_NAVI33_GC_MEC_FW
                 if (p717Gate.mayLoad &&
-                    pspFence == rn_navi33::p717_gc_mec_p1::kPriorFence &&
+                    pspFence == rn_navi33::p717_gc_mec_p3::kPriorFence &&
                     !p7SubmitTransportQuarantined &&
                     navi33PmfwBuf && navi33PmfwBuf->getBytesNoCopy() &&
                     sizeof(kRNNavi33GcMecDataFw) ==
@@ -8110,9 +8110,9 @@ bool RedNaviProbe::start(IOService *provider) {
                     };
                     p717FenceOk = pspSubmitP7(
                         p71RingGpuVa, p71CmdGpuVa, p71FenceGpuVa,
-                        rn_navi33::p717_gc_mec_p1::kCommandId,
+                        rn_navi33::p717_gc_mec_p3::kCommandId,
                         p717Gate.words,
-                        rn_navi33::p717_gc_mec_p1::kArgumentCount,
+                        rn_navi33::p717_gc_mec_p3::kArgumentCount,
                         resp, 4u);
                     p717Submitted = p7SubmitWasIssued;
                     p717ResponseValid = p7SubmitResponseValid;
@@ -8135,9 +8135,9 @@ bool RedNaviProbe::start(IOService *provider) {
                     p717Accepted = p717FenceOk && p717ResponseValid &&
                         p717Status == 0u &&
                         p717FenceExpected ==
-                            rn_navi33::p717_gc_mec_p1::kExpectedFence &&
+                            rn_navi33::p717_gc_mec_p3::kExpectedFence &&
                         p717FenceObserved ==
-                            rn_navi33::p717_gc_mec_p1::kExpectedFence;
+                            rn_navi33::p717_gc_mec_p3::kExpectedFence;
                 } else if (p717Gate.mayLoad) {
                     p717TransportError = 10u;
                 }
@@ -8182,8 +8182,8 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(p717Input.stagePteVerified),
                     static_cast<uint32_t>(p717Input.stageGpuVa),
                     static_cast<uint32_t>(p717Input.stageGpuVa >> 32),
-                    rn_navi33::p717_gc_mec_p1::kCommandId,
-                    rn_navi33::p717_gc_mec_p1::kFirmwareType,
+                    rn_navi33::p717_gc_mec_p3::kCommandId,
+                    rn_navi33::p717_gc_mec_p3::kFirmwareType,
                     p717Input.previousFenceExpected,
                     p717Input.previousFenceObserved,
                     static_cast<uint32_t>(p77Accepted),
@@ -8211,7 +8211,7 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(p717Accepted),
                     0u
                 };
-                rnPublish(this, "navi33-p7-gc-mec-p1-runtime",
+                rnPublish(this, "navi33-p7-gc-mec-p3-runtime",
                           p717Names, p717Values,
                           sizeof(p717Values) / sizeof(p717Values[0]));
                 // Dedicated preflight telemetry makes it possible to
