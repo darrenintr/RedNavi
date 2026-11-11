@@ -1087,3 +1087,87 @@ proves acceptance, not ME execution. The post-PSP
 `post_gate_error=12` should remain expected. On failure
 or timeout keep 0.0.28 recovery EFI and do **not** resubmit
 a PSP command in the same boot.
+
+
+## 0.0.30 — P7.11 GC11.0.2 RS64 ME P0 Stack (tenth PSP fence)
+
+On 2026-11-11 RX 7600 real-hardware P7.10 (RedNavi 0.0.29)
+successfully loaded RS64 ME instruction microcode (type 88,
+174,992 B): PSP fence 8→9/9, status=0, accepted=1,
+response_valid=1, transport_error=0, WPTR/RPTR 128→144.
+The ME instruction load does **not** start the ME/GC engine.
+
+Linux `amdgpu_ucode.c` uses `gc_11_0_2_me.bin` GFX v2.0
+`data_offset_bytes` and `data_size_bytes` for both
+RS64 ME P0_STACK and ME P1_STACK. `psp_gfx_if.h` defines
+`GFX_FW_TYPE_RS64_ME_P0_STACK=92`,
+`GFX_FW_TYPE_RS64_ME_P1_STACK=93`.
+This checkpoint **only** submits P0 Stack (type 92), not P1.
+
+The existing locally reviewed immutable firmware file is
+`beagleboard/mirror-linux-firmware` at commit
+`2f411c10e4570d03426d3cb095471aa1120114ab`,
+`amdgpu/gc_11_0_2_me.bin`, blob SHA1
+`768153275be4ea6ff76d68d945d5630de283e3f1`.
+Full file 314,512 B, GFX2.0, instruction offset 256 size
+174,992 B and **data offset 175,248 size 139,264 B**.
+The generator now locally emits *both* arrays (the P0 data
+was not included in the previous generated header). Source
+hash, header geometry, IP, stage-size checks remain enforced.
+Never check source firmware or the generated local header in.
+
+### Build and two-stage safety test
+
+On macOS:
+```sh
+cd ~/RedNavi
+git fetch origin
+git switch --track origin/feature/navi33-p711-gc-me-p0
+python3 tools/gen_navi33_gc_me_fw_header.py \
+  ~/RedNavi-firmware/gc_11_0_2_me.bin \
+  RedNavi/navi33_gc_me_fw.h
+make clean
+make test && make navi33-p4
+```
+
+Retain the existing, proven P7.4–P7.10 opt-ins, especially
+`rednavi_navi33_p710_gc_me=1`, and set
+`rednavi_navi33_p7_step=13`. Do **not** set the new
+`rednavi_navi33_p711_gc_me_p0=1` opt-in on the first boot.
+The first boot must load all previous nine PSP commands,
+then report P7.11 gate-only, no tenth command:
+```text
+navi33-p7-gc-me-p0-runtime:
+  step=13 gate_error=2 explicit_opt_in=0
+  me_accepted=1 pfp_accepted=1 p0_accepted=1 p1_accepted=1
+  sdma_both_accepted=1 source_verified=1
+  prior_fence_expected=9 prior_fence_observed=9
+  fw_type=92 firmware_bytes=139264
+  submitted=0 accepted=0
+```
+
+After verifying these values on the RX 7600 real hardware,
+a separate fresh reboot with `rednavi_navi33_p711_gc_me_p0=1`
+may enable the **tenth** PSP command. This gate requires
+prior ME accepted in this boot, PSP fence9, matching GC11.0.2
+IP, the hash-pinned ME Data array, retained host DMA stage
+and GART PTEs, current-boot PMFW/TMR/SDMA/PFP prerequisites,
+and healthy unquarantined PSP transport.
+
+Expected successful response:
+```text
+navi33-p7-gc-me-p0-runtime:
+  gate_error=0 may_load=1
+  fw_type=92 firmware_bytes=139264 command_id=6
+  submitted=1 submit_wptr_before=144 submit_wptr_after=160
+  fence_before=9 fence_expected=10 fence_observed=10
+  response_valid=1 status=0 accepted=1
+  submit_rptr_final=160 transport_error=0
+  gc_me_p0_loaded=1 gc_engine_started=0
+```
+
+Keep a separate verified 0.0.29 USB EFI as a recovery
+route; do not repeat a PSP submit on a timed-out/dirty ring.
+This checkpoint does not load ME P1_STACK, MEC/RLC/MES,
+activate a graphics command queue or provide macOS Metal.
+`post_gate_error=12` and `may_start_mes=0` remain expected.

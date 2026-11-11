@@ -7,8 +7,8 @@ amdgpu/gc_11_0_2_me.bin (reviewed Git blob SHA-1).
 No proprietary binary, payload, or generated header is committed.
 
 Usage:
-    python3 tools/gen_navi33_gc_pfp_fw_header.py \
-      /path/gc_11_0_2_me.bin RedNavi/navi33_gc_pfp_fw.h
+    python3 tools/gen_navi33_gc_me_fw_header.py \
+      /path/gc_11_0_2_me.bin RedNavi/navi33_gc_me_fw.h
 """
 import argparse
 import hashlib
@@ -68,8 +68,8 @@ def parse_image(data):
         data_bytes > len(data) - data_off or
         code_bytes + data_bytes > common_ucode_bytes):
         raise ValueError("GC ME code/data segments overlap or exceed source")
-    if code_bytes > MAX_STAGING_BYTES:
-        raise ValueError("ME instruction segment exceeds DMA staging budget")
+    if max(code_bytes, data_bytes) > MAX_STAGING_BYTES:
+        raise ValueError("ME instruction/data segment exceeds DMA staging budget")
     return {
         "version": version,
         "code": data[code_off:code_off + code_bytes],
@@ -119,10 +119,18 @@ def generate(source, target):
                 f"0x{byte:02x}" for byte in data_to_emit[offset:offset+16]) +
                     ",\n")
         f.write("};\n")
+        # Linux uses identical data bytes for P0/P1 ME stacks,
+        # but they require separate PSP type 92 / 93 commands.
+        f.write("static const unsigned char kRNNavi33GcMeDataFw[] = {\n")
+        for offset in range(0, len(parsed["data"]), 16):
+            f.write("    " + ", ".join(
+                f"0x{byte:02x}" for byte in parsed["data"][offset:offset + 16]) +
+                ",\n")
+        f.write("};\n")
     print(
         f"Navi33 GC11.0.2 RS64 ME v{parsed['version']}; "
         f"code {parsed['code_bytes']} B; data {parsed['data_bytes']} B "
-        f"(not staged); Git blob {actual}; SHA-256 {digest}")
+        f"(ME P0/P1 stage available); Git blob {actual}; SHA-256 {digest}")
 
 
 def main(argv=None):
