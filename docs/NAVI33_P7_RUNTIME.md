@@ -1006,3 +1006,84 @@ or activate Metal. `post_gate_error=12`,
 `may_start_mes=0` remain expected until remaining RS64
 ME/MEC, RLC and scheduler dependencies have been addressed.
 On a PSP timeout/hang, do not retry the ring until reboot.
+
+
+## 0.0.29 — P7.10 GC11.0.2 RS64 ME instruction firmware (ninth PSP fence)
+
+The RX 7600 P7.9/0.0.28 real-hardware trace on 2026-11-11
+shows PFP P1_STACK (type 91, 139264 B) at PSP fence 8/8,
+with status=0, response_valid=1, accepted=1,
+transport_error=0, WPTR and RPTR 112→128. The RS64 PFP
+code and both data stacks were all accepted; engine remains off.
+
+Linux `psp_gfx_if.h` defines `GFX_FW_TYPE_RS64_ME=88`,
+and `amdgpu_ucode.c` selects the instruction block from
+`gc_11_0_2_me.bin` GFX2.0 header. The pinned firmware at
+`beagleboard/mirror-linux-firmware` commit
+`2f411c10e4570d03426d3cb095471aa1120114ab` has Git
+blob SHA-1 `768153275be4ea6ff76d68d945d5630de283e3f1` and:
+- full file: 314,512 B;
+- common header v2.0, GC major/minor 11.0, ASIC revision 2 pinned
+  by Git blob hash and separately verified from real IP Discovery;
+- version 2380, GFX ucode feature version 29;
+- code segment at offset 256, **174,992 B**;
+- data segment at offset 175,248, 139,264 B (**not staged now**).
+
+The ignored locally generated header `RedNavi/navi33_gc_me_fw.h`
+is produced by `tools/gen_navi33_gc_me_fw_header.py`.
+The generator verifies the immutable full-source hash,
+GFX2.0 header and code/data geometry. It embeds **only**
+the code segment. No vendor firmware binary is committed.
+
+### Build (Step 12 admission-only)
+
+```sh
+cd ~/RedNavi
+git fetch origin
+git switch --track origin/feature/navi33-p710-gc-me
+mkdir -p ~/RedNavi-firmware
+curl -fL --retry 3 \
+  'https://raw.githubusercontent.com/beagleboard/mirror-linux-firmware/2f411c10e4570d03426d3cb095471aa1120114ab/amdgpu/gc_11_0_2_me.bin' \
+  -o ~/RedNavi-firmware/gc_11_0_2_me.bin
+python3 tools/gen_navi33_gc_me_fw_header.py \
+  ~/RedNavi-firmware/gc_11_0_2_me.bin \
+  RedNavi/navi33_gc_me_fw.h
+make clean
+make test && make navi33-p4
+```
+
+Retain existing P7.4–P7.9 explicit opt-ins, including
+`rednavi_navi33_p79_pfp_p1=1`. Initially set
+`rednavi_navi33_p7_step=12` but **do not** set
+`rednavi_navi33_p710_gc_me=1`; P7.10 remains gate-only.
+Expect `navi33-p7-gc-me-runtime`:
+```text
+step=12 gate_error=2 explicit_opt_in=0 submitted=0 accepted=0
+p1_accepted=1 p0_accepted=1 pfp_accepted=1
+prior_fence_expected=8 prior_fence_observed=8
+source_verified=1 firmware_bytes=174992 fw_type=88
+```
+
+Only after verifying the first round on the RX 7600, enable
+`rednavi_navi33_p710_gc_me=1` in a **separate fresh boot**.
+The software gate also requires PFP code/P0/P1 and both SDMA
+threads accepted in this boot, correct Navi33 GC11.0.2 identity
+and ME source verification, PSP fence8, retained stage/PTEs,
+and an unquarantined PSP transport. Expected:
+```text
+navi33-p7-gc-me-runtime:
+  gate_error=0 may_load=1 command_id=6 fw_type=88
+  firmware_bytes=174992
+  submitted=1 submit_wptr_before=128 submit_wptr_after=144
+  fence_before=8 fence_expected=9 fence_observed=9
+  status=0 response_valid=1 accepted=1
+  submit_rptr_final=144
+  gc_me_firmware_loaded=1 gc_engine_started=0
+```
+
+No graphics queue, ME data stacks, MEC, RLC, MES or Metal
+acceleration is provided. A PSP LOAD_IP_FW acknowledgement
+proves acceptance, not ME execution. The post-PSP
+`post_gate_error=12` should remain expected. On failure
+or timeout keep 0.0.28 recovery EFI and do **not** resubmit
+a PSP command in the same boot.
