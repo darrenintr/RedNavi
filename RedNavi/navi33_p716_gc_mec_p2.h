@@ -12,7 +12,7 @@
 namespace rn_navi33 { namespace p716_gc_mec_p2 {
 
 constexpr uint32_t kCommandId = 0x06u;
-constexpr uint32_t kFirmwareType = 96u; // GFX_FW_TYPE_RS64_MEC_P1_STACK
+constexpr uint32_t kFirmwareType = 96u; // GFX_FW_TYPE_RS64_MEC_P2_STACK
 constexpr uint32_t kArgumentCount = 4u;
 constexpr uint32_t kPriorFence = 14u;
 constexpr uint32_t kExpectedFence = 15u;
