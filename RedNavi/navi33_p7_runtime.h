@@ -23,11 +23,13 @@
 // step 15: independently consented MEC Code stage enlargement + separate PSP type 89
 // step 16: independently consented MEC P0_STACK data-only PSP checkpoint (type 94)
 // step 17: independently consented MEC P1_STACK data-only PSP checkpoint (type 95)
+// step 18: independently consented MEC P2_STACK data-only PSP checkpoint (type 96)
+// step 19: independently consented MEC P3_STACK data-only PSP checkpoint (type 97)
 #include <stdint.h>
 
 namespace rn_navi33 { namespace p7_runtime {
 
-constexpr uint32_t kMaxExecutionStep = 17u;
+constexpr uint32_t kMaxExecutionStep = 19u;
 
 constexpr uint32_t sanitizeStep(uint32_t raw) {
     return raw <= kMaxExecutionStep ? raw : 0u;
