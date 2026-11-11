@@ -1171,3 +1171,85 @@ route; do not repeat a PSP submit on a timed-out/dirty ring.
 This checkpoint does not load ME P1_STACK, MEC/RLC/MES,
 activate a graphics command queue or provide macOS Metal.
 `post_gate_error=12` and `may_start_mes=0` remain expected.
+
+
+## 0.0.31 — P7.12 GC11.0.2 RS64 ME P1 Stack (eleventh PSP fence)
+
+The RX 7600 P7.11 / 0.0.30 real hardware observation
+(2026-11-11) confirms RS64 ME P0_STACK (type 92, 139264 B)
+PSP accepted at fence 9→10/10, status=0, response_valid=1,
+accepted=1, zero transport errors, ring WPTR/RPTR 144→160.
+PFP Code/P0/P1 and ME Code/P0 are already verified. No engine started.
+
+Linux `amdgpu_ucode.c` uses precisely the same GFX v2.0
+`gc_11_0_2_me.bin` data slice for ME P0_STACK and P1_STACK.
+The PSP firmware IDs are different:
+`GFX_FW_TYPE_RS64_ME_P0_STACK=92` and
+`GFX_FW_TYPE_RS64_ME_P1_STACK=93` (`psp_gfx_if.h`).
+P7.12 sends **only P1** using one new PSP LOAD_IP_FW.
+
+The existing, locally generated `RedNavi/navi33_gc_me_fw.h`
+already contains the correct ME data payload
+(offset=175248, length=139264 B) and has been pinned against
+the reviewed Git blob SHA1
+`768153275be4ea6ff76d68d945d5630de283e3f1`
+of `gc_11_0_2_me.bin` at
+`beagleboard/mirror-linux-firmware`
+commit `2f411c10e4570d03426d3cb095471aa1120114ab`.
+No new firmware download is needed. Keep the vendor file
+and generated local header out of Git.
+
+### Build and double-gated verification
+
+```sh
+cd ~/RedNavi
+git fetch origin
+git switch --track origin/feature/navi33-p712-gc-me-p1
+test -s RedNavi/navi33_gc_me_fw.h
+grep -Fq '768153275be4ea6ff76d68d945d5630de283e3f1' \
+    RedNavi/navi33_gc_me_fw.h
+grep -Fq 'kRNNavi33GcMeDataFw' RedNavi/navi33_gc_me_fw.h
+make clean
+make test && make navi33-p4
+```
+
+Keep the proven 0.0.30 USB EFI backup. For initial hardware
+safety check retain all previous opt-ins including
+`rednavi_navi33_p710_gc_me=1` and
+`rednavi_navi33_p711_gc_me_p0=1`, and set
+`rednavi_navi33_p7_step=14`. **Omit**
+`rednavi_navi33_p712_gc_me_p1=1` on the first boot.
+Expect admission-only IORegistry output:
+```text
+navi33-p7-gc-me-p1-runtime:
+  step=14 gate_error=2 explicit_opt_in=0
+  me_accepted=1 me_p0_accepted=1
+  pfp_accepted=1 p0_accepted=1 p1_accepted=1
+  sdma_both_accepted=1 source_verified=1
+  prior_fence_expected=10 prior_fence_observed=10
+  fw_type=93 firmware_bytes=139264
+  submitted=0 accepted=0
+```
+
+Only after the first boot proves the full previous chain,
+enable `rednavi_navi33_p712_gc_me_p1=1` and reboot again.
+Gate policy also requires exact GC11.0.2 IP, pinned source,
+retained GPU-addressable DMA staging, verified PTEs,
+PSP transport healthy and the predecessor's fence=10.
+Expected result for the eleventh PSP GPCOM command:
+```text
+navi33-p7-gc-me-p1-runtime:
+  gate_error=0 may_load=1
+  fw_type=93 firmware_bytes=139264 command_id=6
+  submitted=1 submit_wptr_before=160 submit_wptr_after=176
+  fence_before=10 fence_expected=11 fence_observed=11
+  response_valid=1 status=0 accepted=1
+  submit_rptr_final=176 transport_error=0
+  gc_me_p1_loaded=1 gc_engine_started=0
+```
+
+All graphics engines, SDMA/MES queue startup and Metal
+acceleration remain disabled. PSP acceptance of ME P1 does
+NOT mean GC firmware has finished loading or ME is executing.
+`post_gate_error=12`, `may_start_mes=0` remain expected.
+Do not retry a stalled PSP ring in the same boot.

@@ -19,11 +19,12 @@
 // step 11: optional RS64 PFP P1_STACK data-only PSP checkpoint
 // step 12: optional RS64 ME instruction-only PSP checkpoint (type 88)
 // step 13: optional RS64 ME P0_STACK PSP checkpoint (type 92)
+// step 14: optional RS64 ME P1_STACK PSP checkpoint (type 93)
 #include <stdint.h>
 
 namespace rn_navi33 { namespace p7_runtime {
 
-constexpr uint32_t kMaxExecutionStep = 13u;
+constexpr uint32_t kMaxExecutionStep = 14u;
 
 constexpr uint32_t sanitizeStep(uint32_t raw) {
     return raw <= kMaxExecutionStep ? raw : 0u;
