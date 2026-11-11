@@ -929,3 +929,80 @@ The PFP P0_STACK load does not start any graphics engines,
 complete GC firmware, or enable MES. In particular,
 `post_gate_error=12` and `may_start_mes=0` remain expected.
 Do not retry a stalled command without reboot.
+
+
+## 0.0.28 — P7.9 GC11.0.2 RS64 PFP P1 Stack (eighth PSP fence)
+
+Verified RX 7600 / 0.0.27 P7.8 hardware report (2026-11-11):
+`GFX_FW_TYPE_RS64_PFP_P0_STACK=90`, firmware size 139264 B,
+`fence_before=6`, `fence_expected=fence_observed=7`,
+`response_valid=1`, `status=0`, `accepted=1`,
+`transport_error=0`, and ring WPTR/RPTR 96→112.
+This allows one incremental independent **PFP P1 Stack**
+load in Step 11, with a *new* opt-in.
+
+Linux `amdgpu_ucode.c` uses the same GFX v2.0 data segment
+for `AMDGPU_UCODE_ID_CP_RS64_PFP_P0_STACK` and
+`AMDGPU_UCODE_ID_CP_RS64_PFP_P1_STACK`, but maps them to
+distinct PSP `GFX_FW_TYPE_RS64_PFP_P0_STACK=90` and
+`GFX_FW_TYPE_RS64_PFP_P1_STACK=91` via
+`psp_gfx_if.h`/`amdgpu_psp.c`.
+No additional firmware download is needed. It reuses the
+existing locally generated `RedNavi/navi33_gc_pfp_fw.h`
+from the pinned full source `gc_11_0_2_pfp.bin` (Git blob
+`4d18151728ccc513fbabddec25f58dcccc8eee2a`).
+Only the same 139,264-byte GFX2.0 PFP Data payload is staged.
+
+### Build and two-boot verification
+
+On macOS, switch to `feature/navi33-p79-gc-pfp-p1`,
+retain locally generated and hash-reviewed PSP/SMU/SDMA/PFP
+headers, and compile `RedNaviNavi33P4.kext` version 0.0.28.
+Back up the known-working 0.0.27 EFI.
+
+First boot: preserve all prior opt-ins:
+```text
+rednavi_navi33_p74_setup_tmr=1
+rednavi_navi33_p75_sdma_th0=1
+rednavi_navi33_p76_sdma_th1=1
+rednavi_navi33_p77_gc_pfp=1
+rednavi_navi33_p78_pfp_p0=1
+```
+Set `rednavi_navi33_p7_step=11`, but do **not** yet enable
+`rednavi_navi33_p79_pfp_p1=1`. This safe admission checkpoint
+re-executes the prior seven PSP commands, then reports:
+```text
+navi33-p7-gc-pfp-p1-runtime:
+  step=11 gate_error=2 explicit_opt_in=0
+  pfp_accepted=1 p0_accepted=1 sdma_both_accepted=1
+  prior_fence_expected=7 prior_fence_observed=7
+  fw_type=91 firmware_bytes=139264
+  submitted=0 accepted=0
+```
+
+After confirmed real-hardware gate-only telemetry, a **second
+fresh boot** may enable the independent
+`rednavi_navi33_p79_pfp_p1=1` bootarg. P79 refuses the command
+without current-boot PFP/P0 acceptance, exact previous PSP
+fence7, correct GC11.0.2 IP, matching source provenance,
+retained mapped DMA stage/PTEs and healthy PSP transport.
+
+Expected success on eighth PSP GPCOM command:
+```text
+navi33-p7-gc-pfp-p1-runtime:
+  gate_error=0 may_load=1
+  command_id=6 fw_type=91 firmware_bytes=139264
+  submitted=1 submit_wptr_before=112 submit_wptr_after=128
+  fence_before=7 fence_expected=8 fence_observed=8
+  fence_ok=1 response_valid=1 status=0 accepted=1
+  submit_rptr_final=128
+  gc_pfp_p1_loaded=1 gc_engine_started=0
+  transport_error=0 transport_quarantined=0
+```
+
+PFP code+P0+P1 all accepted does **not** complete GC
+firmware, start PFP/GC engines, SDMA command rings, MES,
+or activate Metal. `post_gate_error=12`,
+`may_start_mes=0` remain expected until remaining RS64
+ME/MEC, RLC and scheduler dependencies have been addressed.
+On a PSP timeout/hang, do not retry the ring until reboot.
