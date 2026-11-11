@@ -580,3 +580,103 @@ Note: the current visible-VRAM free-range ledger is a software
 ownership contract, not an implementation of a full operating-system
 VRAM allocator. Do not run the experiment if another GPU owner or
 another driver may concurrently allocate the candidate region.
+
+
+
+## 0.0.24: P7.5 SDMA6.0.2 Context Thread, one-PSP-command checkpoint
+
+The 2026-11-11 RX 7600 hardware report confirmed Step 6 SETUP_TMR:
+`fence_expected=3`, `fence_observed=3`, `response_valid=1`,
+`status=0`, `accepted=1`, and `may_load_ip_fw=1`.
+The third PSP frame used WPTR 32→48; its RPTR remained 32 at the
+final snapshot despite a valid fence/status. Do not use RPTR alone as
+success or failure; observe it along with the fence on Step 7.
+
+The upstream kernel uses `sdma_6_0_2.bin` for Navi33 SDMA 6.0.2.
+`struct sdma_firmware_header_v2_0` encodes Context Thread at
+`ucode_array_offset_bytes`, length `ctx_ucode_size_bytes`, and
+Control Thread separately at `ctl_ucode_offset`, length
+`ctl_ucode_size_bytes`. PSP `GFX_FW_TYPE_SDMA_UCODE_TH0=71`,
+`GFX_CMD_ID_LOAD_IP_FW=6`. This checkpoint **loads only TH0**;
+it does not load TH1, start SDMA engines, or claim an operational ring.
+
+Avoid repeating the earlier Navi32 PMFW bug: the generator requires the
+exact separately reviewed 2025-04-15 linux-firmware mirror snapshot,
+even when the caller has another image with the right filename.
+Pin (file itself is not committed):
+- source: `beagleboard/mirror-linux-firmware`;
+- commit: `2f411c10e4570d03426d3cb095471aa1120114ab`;
+- file: `amdgpu/sdma_6_0_2.bin`, 34,560 bytes;
+- reviewed Git blob SHA-1: `28dd03efcb3a134edcf066d0820d0c2051879525`.
+
+On macOS, download the exact source and generate an ignored local
+compile-time header:
+
+```sh
+cd ~/RedNavi
+mkdir -p ~/RedNavi-firmware
+curl -fL --retry 3 \
+  'https://raw.githubusercontent.com/beagleboard/mirror-linux-firmware/2f411c10e4570d03426d3cb095471aa1120114ab/amdgpu/sdma_6_0_2.bin' \
+  -o ~/RedNavi-firmware/sdma_6_0_2.bin
+
+python3 tools/gen_navi33_sdma_fw_header.py \
+  ~/RedNavi-firmware/sdma_6_0_2.bin RedNavi/navi33_sdma_fw.h
+
+make clean
+make test
+make navi33-p4
+```
+
+The generator verifies the *Git blob object hash* over the exact
+source bytes (Git's `blob <length>\\0<contents>` form), SDMA v2.0
+header, IP6.0 version, and both thread offsets. The generated
+header is Git-ignored and must not be pushed.
+
+Safety: Step 7 without a second opt-in is a read-only P7.5
+admission report after the already validated Step 6.
+First boot:
+```text
+rednavi_navi33_p7_step=7
+rednavi_navi33_p74_setup_tmr=1
+# do not add the P75 opt-in yet
+```
+Expect `navi33-p7-sdma-runtime.gate_error=2`,
+`submitted=0`. After verifying that phase, in a separate
+boot add:
+```text
+rednavi_navi33_p75_sdma_th0=1
+```
+
+Step 7 refuses wrong IP Discovery (must be SDMA 6.0.2), unreviewed
+firmware, missing PMFW/TMR acceptance, fence3 mismatch,
+quarantined ring, invalid GART VA, unmapped stage, or too-large
+firmware. Only after all gates pass does it reuse the **existing**
+PSP-mapped PMFW stage, copy TH0, publish an x86 DMA memory barrier,
+and submit one LOAD_IP_FW(type=71). No new PTEs/GART changes.
+The host DMA backing is retained until reboot.
+
+Expected Step 7 success:
+```text
+navi33-p7-sdma-runtime:
+  gate_error = 0
+  may_load = 1
+  firmware_ip_revision = 2
+  observed_ip_revision = 2
+  source_verified = 1
+  cmd_id = 6
+  fw_type = 71
+  prior_fence_expected = 3
+  prior_fence_observed = 3
+  submitted = 1
+  fence_expected = 4
+  fence_observed = 4
+  fence_ok = 1
+  response_valid = 1
+  status = 0
+  accepted = 1
+  sdma_engine_started = 0
+```
+
+PSP acceptance **does not prove** a running SDMA engine or graphics
+acceleration; next steps are SDMA Control Thread and then the
+GC11.0.2 firmware path. Keep a known-bootable 0.0.23 EFI.
