@@ -11,3 +11,6 @@ RedNavi/gc_*.h
 !RedNavi/gc_regs.h
 rn_test_x86
 mesa-bridge/bridge_test
+
+# Local Navi33 SDMA binary-derived header; never distribute source firmware.
+RedNavi/navi33_sdma_fw.h

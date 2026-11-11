@@ -106,6 +106,7 @@
 #include "navi33_p7_postpsp.h"
 #include "navi33_p7_tmr_plan.h"
 #include "navi33_p74_setup_tmr.h"
+#include "navi33_p75_sdma.h"
 #include "navi33_p7_pmfw.h"
 #include "navi33_p6_psp_boot_plan.h"
 #include "navi33_p6_psp_staging.h"
@@ -124,6 +125,9 @@
 #endif
 #ifdef RN_HAVE_SMU_FW
 #include "smu_fw.h"
+#endif
+#ifdef RN_HAVE_NAVI33_SDMA_FW
+#include "navi33_sdma_fw.h"
 #endif
 #ifdef RN_HAVE_GC_FW
 #include "gc_fw.h"
@@ -5650,6 +5654,190 @@ bool RedNaviProbe::start(IOService *provider) {
                           sizeof(p74Values) / sizeof(p74Values[0]));
 
                 postInput.tmrAccepted = p74Accepted;
+                const auto postTmrGate =
+                    rn_navi33::p7_postpsp::inspect(postInput);
+
+                // P7.5: single additional PSP LOAD_IP_FW command. The first
+                // Navi33 SDMA6.0.2 Context Thread is loaded into TMR, but
+                // NO SDMA/GC/MES hardware engine is started. This reuses
+                // already-mapped PMFW stage only after completed fence 3.
+                uint32_t p75OptInRaw = 0u;
+                const bool p75OptIn =
+                    PE_parse_boot_argn("rednavi_navi33_p75_sdma_th0",
+                        &p75OptInRaw, sizeof(p75OptInRaw)) &&
+                    p75OptInRaw == 1u;
+
+                rn_navi33::p75_sdma::Input p75Input{};
+                p75Input.requested = p7StepArg >= 7u;
+                p75Input.explicitOptIn = p75OptIn;
+                p75Input.identityVerified =
+                    check.eligibleForComputeBringup();
+                p75Input.observedSdmaMajor = check.observed.sdma.major;
+                p75Input.observedSdmaMinor = check.observed.sdma.minor;
+                p75Input.observedSdmaRevision = check.observed.sdma.revision;
+                p75Input.pspRingReady =
+                    p7PspOk && p71RingCreated && p71RuntimeMapped;
+                p75Input.tmrAccepted =
+                    p74Accepted && postTmrGate.mayLoadIpFirmware;
+                p75Input.previousFenceExpected = p74FenceExpected;
+                p75Input.previousFenceObserved = p74FenceObserved;
+                p75Input.transportHealthy =
+                    p74FenceOk && p74ResponseValid &&
+                    p74TransportError == 0u &&
+                    !p74Quarantined && !p7SubmitTransportQuarantined;
+                p75Input.stageOwnerRetained =
+                    navi33PmfwPrepared && navi33PmfwMapped &&
+                    navi33PmfwBuf &&
+                    navi33PmfwBuf->getBytesNoCopy();
+                p75Input.stageMapped = p73StageMapped;
+                p75Input.stagePteVerified = p73StagePteVerified;
+                p75Input.stageBytes = navi33PmfwStageBytes;
+                p75Input.stageGpuVa = p73StageGpuVa;
+                p75Input.gartStart = gartPlan.gartStart;
+                p75Input.gartEnd = gartPlan.gartEnd;
+
+                uint32_t p75FwVersion = 0u;
+#ifdef RN_HAVE_NAVI33_SDMA_FW
+                p75Input.firmwarePresent = true;
+#ifdef RN_NAVI33_SDMA_FW_METADATA_V1
+                p75Input.firmwareMetadataVerified = true;
+                p75Input.firmwareSourceVerified =
+                    RN_NAVI33_SDMA_FW_SOURCE_VERIFIED == 1;
+                p75Input.firmwareIpMajor = kRNNavi33SdmaIpMajor;
+                p75Input.firmwareIpMinor = kRNNavi33SdmaIpMinor;
+                p75Input.firmwareIpRevision = kRNNavi33SdmaIpRevision;
+                p75Input.firmwareBytes = kRNNavi33SdmaCtxBytes;
+                p75FwVersion = kRNNavi33SdmaVersion;
+#endif
+#endif
+                const auto p75Gate =
+                    rn_navi33::p75_sdma::inspect(p75Input);
+
+                bool p75FenceOk = false;
+                bool p75Submitted = false;
+                bool p75ResponseValid = false;
+                bool p75Accepted = false;
+                uint32_t p75Status = 0xffffffffu;
+                uint32_t p75FwAddrLo = 0u, p75FwAddrHi = 0u;
+                uint32_t p75TransportError = 0u;
+                bool p75Quarantined = p7SubmitTransportQuarantined;
+                uint32_t p75WptrBefore = 0u, p75WptrAfter = 0u;
+                uint32_t p75RptrBefore = 0u, p75RptrAfterKick = 0u;
+                uint32_t p75RptrFinal = 0u;
+                uint32_t p75FenceBefore = 0u, p75FenceExpected = 0u;
+                uint32_t p75FenceObserved = 0u, p75FencePolls = 0u;
+
+#ifdef RN_HAVE_NAVI33_SDMA_FW
+                if (p75Gate.mayLoad &&
+                    pspFence == rn_navi33::p75_sdma::kPriorFence &&
+                    !p7SubmitTransportQuarantined &&
+                    navi33PmfwBuf && navi33PmfwBuf->getBytesNoCopy() &&
+                    sizeof(kRNNavi33SdmaCtxFw) ==
+                        static_cast<size_t>(kRNNavi33SdmaCtxBytes)) {
+                    // No GART PTE mutation: only copy new firmware bytes
+                    // into the retained CPU-visible host-DMA stage after
+                    // SETUP_TMR fence 3 proved PSP has finished the last
+                    // transaction. Preserve the backing until reboot.
+                    uint8_t *const stage =
+                        static_cast<uint8_t *>(
+                            navi33PmfwBuf->getBytesNoCopy());
+                    memset(stage, 0, navi33PmfwStageBytes);
+                    memcpy(stage, kRNNavi33SdmaCtxFw,
+                           kRNNavi33SdmaCtxBytes);
+                    __sync_synchronize();
+
+                    uint32_t resp[4] = {
+                        0xffffffffu, 0xffffffffu,
+                        0xffffffffu, 0xffffffffu
+                    };
+                    p75FenceOk = pspSubmitP7(
+                        p71RingGpuVa, p71CmdGpuVa, p71FenceGpuVa,
+                        rn_navi33::p75_sdma::kCommandId,
+                        p75Gate.words,
+                        rn_navi33::p75_sdma::kArgumentCount,
+                        resp, 4u);
+                    p75Submitted = p7SubmitWasIssued;
+                    p75ResponseValid = p7SubmitResponseValid;
+                    p75TransportError = p7SubmitTransportError;
+                    p75Quarantined = p7SubmitTransportQuarantined;
+                    p75WptrBefore = p7SubmitWptrBefore;
+                    p75WptrAfter = p7SubmitWptrAfter;
+                    p75RptrBefore = p7SubmitRptrBefore;
+                    p75RptrAfterKick = p7SubmitRptrAfterKick;
+                    p75RptrFinal = p7SubmitRptrFinal;
+                    p75FenceBefore = p7SubmitFenceBefore;
+                    p75FenceExpected = p7SubmitFenceExpected;
+                    p75FenceObserved = p7SubmitFenceObserved;
+                    p75FencePolls = p7SubmitPolls;
+                    if (p75ResponseValid) {
+                        p75Status = resp[0];
+                        p75FwAddrLo = resp[2];
+                        p75FwAddrHi = resp[3];
+                    }
+                    p75Accepted = p75FenceOk && p75ResponseValid &&
+                        p75Status == 0u &&
+                        p75FenceExpected ==
+                            rn_navi33::p75_sdma::kExpectedFence &&
+                        p75FenceObserved ==
+                            rn_navi33::p75_sdma::kExpectedFence;
+                } else if (p75Gate.mayLoad) {
+                    // Fail closed on unexpected fence/shared-DMA state.
+                    p75TransportError = 10u;
+                }
+#endif
+                const char *const p75Names[] = {
+                    "step", "gate_error", "requested", "explicit_opt_in",
+                    "may_load", "firmware_present", "metadata_verified",
+                    "source_verified", "observed_ip_revision",
+                    "firmware_ip_revision", "firmware_version",
+                    "firmware_bytes", "stage_capacity", "stage_mapped",
+                    "stage_pte_verified", "stage_va_lo", "stage_va_hi",
+                    "command_id", "fw_type", "prior_fence_expected",
+                    "prior_fence_observed", "submitted",
+                    "submit_wptr_before", "submit_wptr_after",
+                    "submit_rptr_before", "submit_rptr_after_kick",
+                    "submit_rptr_final", "fence_before", "fence_expected",
+                    "fence_observed", "fence_polls", "fence_ok",
+                    "response_valid", "status", "fw_addr_lo", "fw_addr_hi",
+                    "transport_error", "transport_quarantined",
+                    "accepted", "sdma_engine_started"
+                };
+                const uint32_t p75Values[] = {
+                    p7StepArg, static_cast<uint32_t>(p75Gate.error),
+                    static_cast<uint32_t>(p75Input.requested),
+                    static_cast<uint32_t>(p75OptIn),
+                    static_cast<uint32_t>(p75Gate.mayLoad),
+                    static_cast<uint32_t>(p75Input.firmwarePresent),
+                    static_cast<uint32_t>(p75Input.firmwareMetadataVerified),
+                    static_cast<uint32_t>(p75Input.firmwareSourceVerified),
+                    p75Input.observedSdmaRevision,
+                    p75Input.firmwareIpRevision, p75FwVersion,
+                    static_cast<uint32_t>(p75Input.firmwareBytes),
+                    static_cast<uint32_t>(p75Input.stageBytes),
+                    static_cast<uint32_t>(p75Input.stageMapped),
+                    static_cast<uint32_t>(p75Input.stagePteVerified),
+                    static_cast<uint32_t>(p75Input.stageGpuVa),
+                    static_cast<uint32_t>(p75Input.stageGpuVa >> 32),
+                    rn_navi33::p75_sdma::kCommandId,
+                    rn_navi33::p75_sdma::kFirmwareType,
+                    p75Input.previousFenceExpected,
+                    p75Input.previousFenceObserved,
+                    static_cast<uint32_t>(p75Submitted),
+                    p75WptrBefore, p75WptrAfter,
+                    p75RptrBefore, p75RptrAfterKick, p75RptrFinal,
+                    p75FenceBefore, p75FenceExpected, p75FenceObserved,
+                    p75FencePolls, static_cast<uint32_t>(p75FenceOk),
+                    static_cast<uint32_t>(p75ResponseValid),
+                    p75Status, p75FwAddrLo, p75FwAddrHi,
+                    p75TransportError, static_cast<uint32_t>(p75Quarantined),
+                    static_cast<uint32_t>(p75Accepted),
+                    0u
+                };
+                rnPublish(this, "navi33-p7-sdma-runtime",
+                          p75Names, p75Values,
+                          sizeof(p75Values) / sizeof(p75Values[0]));
+                // TH0 alone is not an initialized SDMA engine. Do not mark
+                // sdmaFirmwareLoaded or allow graphics queues to start.
                 const auto postGate =
                     rn_navi33::p7_postpsp::inspect(postInput);
 
