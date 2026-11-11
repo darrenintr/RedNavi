@@ -119,6 +119,7 @@
 #include "navi33_p715_gc_mec_p1.h"
 #include "navi33_p716_gc_mec_p2.h"
 #include "navi33_p717_gc_mec_p3.h"
+#include "navi33_p718_rlc_g.h"
 #include "navi33_p713_stage_expand.h"
 #include "navi33_p7_pmfw.h"
 #include "navi33_p6_psp_boot_plan.h"
@@ -150,6 +151,9 @@
 #endif
 #ifdef RN_HAVE_NAVI33_GC_MEC_FW
 #include "navi33_gc_mec_fw.h"
+#endif
+#ifdef RN_HAVE_NAVI33_GC_RLC_FW
+#include "navi33_gc_rlc_fw.h"
 #endif
 #ifdef RN_HAVE_GC_FW
 #include "gc_fw.h"
@@ -8214,6 +8218,210 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-p7-gc-mec-p3-runtime",
                           p717Names, p717Values,
                           sizeof(p717Values) / sizeof(p717Values[0]));
+                // P7.18: RLC-G PSP LOAD_IP_FW type8 after MEC P3 fence16.
+                // This loads RLC code but does NOT start RLC, IMU or GC.
+                uint32_t p718OptInRaw = 0u;
+                const bool p718OptIn =
+                    PE_parse_boot_argn(
+                        "rednavi_navi33_p718_rlc_g",
+                        &p718OptInRaw, sizeof(p718OptInRaw)) &&
+                    p718OptInRaw == 1u;
+                rn_navi33::p718_rlc_g::Input p718Input{};
+                p718Input.requested = p7StepArg >= 20u;
+                p718Input.explicitOptIn = p718OptIn;
+                p718Input.identityVerified = p717Input.identityVerified;
+                p718Input.observedGcMajor = p717Input.observedGcMajor;
+                p718Input.observedGcMinor = p717Input.observedGcMinor;
+                p718Input.observedGcRevision = p717Input.observedGcRevision;
+                p718Input.pspRingReady = p717Input.pspRingReady;
+                p718Input.tmrAccepted = p74Accepted;
+                p718Input.sdmaBothAccepted = p717Input.sdmaBothAccepted;
+                p718Input.pfpAccepted = p77Accepted;
+                p718Input.p0Accepted = p78Accepted;
+                p718Input.p1Accepted = p79Accepted;
+                p718Input.meAccepted = p710Accepted;
+                p718Input.meP0Accepted = p711Accepted;
+                p718Input.meP1Accepted = p712Accepted;
+                p718Input.mecAccepted = p713Accepted;
+                p718Input.mecP3Accepted = p717Accepted;
+                p718Input.stageExpansionVerified =
+                    p713StagePlan.mayExpand && p73StagePrepared &&
+                    p73StageMapped && p73StagePteVerified &&
+                    navi33PmfwStageBytes == p713StagePlan.targetStageBytes;
+                p718Input.previousFenceExpected = p717FenceExpected;
+                p718Input.previousFenceObserved = p717FenceObserved;
+                p718Input.transportHealthy =
+                    p717FenceOk && p717ResponseValid &&
+                    p717TransportError == 0u &&
+                    !p717Quarantined && !p7SubmitTransportQuarantined;
+                p718Input.stageOwnerRetained = p717Input.stageOwnerRetained;
+                p718Input.stageMapped = p717Input.stageMapped;
+                p718Input.stagePteVerified = p717Input.stagePteVerified;
+                p718Input.stageBytes = p717Input.stageBytes;
+                p718Input.stageGpuVa = p717Input.stageGpuVa;
+                p718Input.gartStart = p717Input.gartStart;
+                p718Input.gartEnd = p717Input.gartEnd;
+                // RLC-G must come from its own pinned source, never
+                // inherit trusted MEC metadata or size by accident.
+                uint32_t p718FwVersion = 0u;
+#if defined(RN_HAVE_NAVI33_GC_RLC_FW) && \
+    defined(RN_NAVI33_GC_RLC_FW_METADATA_V1) && \
+    defined(RN_NAVI33_GC_RLC_FW_SOURCE_VERIFIED)
+                p718Input.firmwarePresent = kRNNavi33GcRlcGBytes > 0u;
+                p718Input.firmwareMetadataVerified =
+                    kRNNavi33GcRlcSourceBytes == 178848u &&
+                    kRNNavi33GcRlcHeaderMajor == 2u;
+                p718Input.firmwareSourceVerified =
+                    RN_NAVI33_GC_RLC_FW_SOURCE_VERIFIED == 1;
+                p718Input.firmwareIpMajor = kRNNavi33GcRlcIpMajor;
+                p718Input.firmwareIpMinor = kRNNavi33GcRlcIpMinor;
+                p718Input.firmwareIpRevision = kRNNavi33GcRlcIpRevision;
+                p718Input.firmwareBytes = kRNNavi33GcRlcGBytes;
+                p718FwVersion = kRNNavi33GcRlcVersion;
+#endif
+                const auto p718Gate =
+                    rn_navi33::p718_rlc_g::inspect(p718Input);
+
+                bool p718FenceOk = false;
+                bool p718Submitted = false;
+                bool p718ResponseValid = false;
+                bool p718Accepted = false;
+                uint32_t p718Status = 0xffffffffu;
+                uint32_t p718FwAddrLo = 0u, p718FwAddrHi = 0u;
+                uint32_t p718TransportError = 0u;
+                bool p718Quarantined = p7SubmitTransportQuarantined;
+                uint32_t p718WptrBefore = 0u, p718WptrAfter = 0u;
+                uint32_t p718RptrBefore = 0u, p718RptrAfterKick = 0u;
+                uint32_t p718RptrFinal = 0u;
+                uint32_t p718FenceBefore = 0u, p718FenceExpected = 0u;
+                uint32_t p718FenceObserved = 0u, p718FencePolls = 0u;
+
+#ifdef RN_HAVE_NAVI33_GC_RLC_FW
+                if (p718Gate.mayLoad &&
+                    pspFence == rn_navi33::p718_rlc_g::kPriorFence &&
+                    !p7SubmitTransportQuarantined &&
+                    navi33PmfwBuf && navi33PmfwBuf->getBytesNoCopy() &&
+                    sizeof(kRNNavi33GcRlcGFw) ==
+                        static_cast<size_t>(kRNNavi33GcRlcGBytes)) {
+                    // The vetted RLC-G executable payload is staged
+                    // from a locally generated header. No RLC startup.
+                    uint8_t *const stage = static_cast<uint8_t *>(
+                        navi33PmfwBuf->getBytesNoCopy());
+                    memset(stage, 0, navi33PmfwStageBytes);
+                    memcpy(stage, kRNNavi33GcRlcGFw,
+                           kRNNavi33GcRlcGBytes);
+                    __sync_synchronize();
+
+                    uint32_t resp[4] = {
+                        0xffffffffu, 0xffffffffu,
+                        0xffffffffu, 0xffffffffu
+                    };
+                    p718FenceOk = pspSubmitP7(
+                        p71RingGpuVa, p71CmdGpuVa, p71FenceGpuVa,
+                        rn_navi33::p718_rlc_g::kCommandId,
+                        p718Gate.words,
+                        rn_navi33::p718_rlc_g::kArgumentCount,
+                        resp, 4u);
+                    p718Submitted = p7SubmitWasIssued;
+                    p718ResponseValid = p7SubmitResponseValid;
+                    p718TransportError = p7SubmitTransportError;
+                    p718Quarantined = p7SubmitTransportQuarantined;
+                    p718WptrBefore = p7SubmitWptrBefore;
+                    p718WptrAfter = p7SubmitWptrAfter;
+                    p718RptrBefore = p7SubmitRptrBefore;
+                    p718RptrAfterKick = p7SubmitRptrAfterKick;
+                    p718RptrFinal = p7SubmitRptrFinal;
+                    p718FenceBefore = p7SubmitFenceBefore;
+                    p718FenceExpected = p7SubmitFenceExpected;
+                    p718FenceObserved = p7SubmitFenceObserved;
+                    p718FencePolls = p7SubmitPolls;
+                    if (p718ResponseValid) {
+                        p718Status = resp[0];
+                        p718FwAddrLo = resp[2];
+                        p718FwAddrHi = resp[3];
+                    }
+                    p718Accepted = p718FenceOk && p718ResponseValid &&
+                        p718Status == 0u &&
+                        p718FenceExpected ==
+                            rn_navi33::p718_rlc_g::kExpectedFence &&
+                        p718FenceObserved ==
+                            rn_navi33::p718_rlc_g::kExpectedFence;
+                } else if (p718Gate.mayLoad) {
+                    p718TransportError = 10u;
+                }
+#endif
+
+                const char *const p718Names[] = {
+                    "step", "gate_error", "requested", "explicit_opt_in",
+                    "may_load", "firmware_present", "metadata_verified",
+                    "source_verified", "observed_gc_revision",
+                    "firmware_gc_revision", "firmware_version",
+                    "firmware_bytes", "stage_capacity", "stage_mapped",
+                    "stage_pte_verified", "stage_va_lo", "stage_va_hi",
+                    "command_id", "fw_type", "prior_fence_expected",
+                    "prior_fence_observed", "pfp_accepted",
+                    "p0_accepted", "p1_accepted", "me_accepted",
+                    "me_p0_accepted", "me_p1_accepted", "mec_accepted",
+                    "mec_p3_accepted", "stage_expansion_verified",
+                    "stage_expand_opt_in",
+                    "stage_plan_error", "sdma_both_accepted", "submitted",
+                    "submit_wptr_before", "submit_wptr_after",
+                    "submit_rptr_before", "submit_rptr_after_kick",
+                    "submit_rptr_final", "fence_before", "fence_expected",
+                    "fence_observed", "fence_polls", "fence_ok",
+                    "response_valid", "status", "fw_addr_lo", "fw_addr_hi",
+                    "transport_error", "transport_quarantined",
+                    "accepted", "gc_rlc_g_loaded",
+                    "gc_engine_started"
+                };
+                const uint32_t p718Values[] = {
+                    p7StepArg, static_cast<uint32_t>(p718Gate.error),
+                    static_cast<uint32_t>(p718Input.requested),
+                    static_cast<uint32_t>(p718OptIn),
+                    static_cast<uint32_t>(p718Gate.mayLoad),
+                    static_cast<uint32_t>(p718Input.firmwarePresent),
+                    static_cast<uint32_t>(p718Input.firmwareMetadataVerified),
+                    static_cast<uint32_t>(p718Input.firmwareSourceVerified),
+                    p718Input.observedGcRevision,
+                    p718Input.firmwareIpRevision, p718FwVersion,
+                    static_cast<uint32_t>(p718Input.firmwareBytes),
+                    static_cast<uint32_t>(p718Input.stageBytes),
+                    static_cast<uint32_t>(p718Input.stageMapped),
+                    static_cast<uint32_t>(p718Input.stagePteVerified),
+                    static_cast<uint32_t>(p718Input.stageGpuVa),
+                    static_cast<uint32_t>(p718Input.stageGpuVa >> 32),
+                    rn_navi33::p718_rlc_g::kCommandId,
+                    rn_navi33::p718_rlc_g::kFirmwareType,
+                    p718Input.previousFenceExpected,
+                    p718Input.previousFenceObserved,
+                    static_cast<uint32_t>(p77Accepted),
+                    static_cast<uint32_t>(p78Accepted),
+                    static_cast<uint32_t>(p79Accepted),
+                    static_cast<uint32_t>(p710Accepted),
+                    static_cast<uint32_t>(p711Accepted),
+                    static_cast<uint32_t>(p712Accepted),
+                    static_cast<uint32_t>(p713Accepted),
+                    static_cast<uint32_t>(p717Accepted),
+                    static_cast<uint32_t>(p718Input.stageExpansionVerified),
+                    static_cast<uint32_t>(p713StageOptIn),
+                    static_cast<uint32_t>(p713StagePlan.error),
+                    static_cast<uint32_t>(p718Input.sdmaBothAccepted),
+                    static_cast<uint32_t>(p718Submitted),
+                    p718WptrBefore, p718WptrAfter,
+                    p718RptrBefore, p718RptrAfterKick, p718RptrFinal,
+                    p718FenceBefore, p718FenceExpected,
+                    p718FenceObserved, p718FencePolls,
+                    static_cast<uint32_t>(p718FenceOk),
+                    static_cast<uint32_t>(p718ResponseValid),
+                    p718Status, p718FwAddrLo, p718FwAddrHi,
+                    p718TransportError, static_cast<uint32_t>(p718Quarantined),
+                    static_cast<uint32_t>(p718Accepted),
+                    static_cast<uint32_t>(p718Accepted),
+                    0u
+                };
+                rnPublish(this, "navi33-p7-gc-rlc-g-runtime",
+                          p718Names, p718Values,
+                          sizeof(p718Values) / sizeof(p718Values[0]));
                 // Dedicated preflight telemetry makes it possible to
                 // prove mapping expansion separately from PSP command.
                 const char *const p713StageNames[] = {
