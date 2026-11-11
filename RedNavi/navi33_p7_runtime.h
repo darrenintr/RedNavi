@@ -25,11 +25,12 @@
 // step 17: independently consented MEC P1_STACK data-only PSP checkpoint (type 95)
 // step 18: independently consented MEC P2_STACK data-only PSP checkpoint (type 96)
 // step 19: independently consented MEC P3_STACK data-only PSP checkpoint (type 97)
+// step 20: separately pinned RLC-G firmware PSP checkpoint (type 8); does NOT start RLC
 #include <stdint.h>
 
 namespace rn_navi33 { namespace p7_runtime {
 
-constexpr uint32_t kMaxExecutionStep = 19u;
+constexpr uint32_t kMaxExecutionStep = 20u;
 
 constexpr uint32_t sanitizeStep(uint32_t raw) {
     return raw <= kMaxExecutionStep ? raw : 0u;
