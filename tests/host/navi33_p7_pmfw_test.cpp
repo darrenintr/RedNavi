@@ -11,6 +11,8 @@ static Input good() {
     in.firmwarePresent = true;
     in.metadataVerified = true;
     in.digestTrusted = true;
+    in.targetVerified = true;
+    in.targetMatch = true;
     in.firmwareBytes = 0x40000;
     in.stageBytes = 0x100000;
     return in;
@@ -60,6 +62,16 @@ int main() {
     {
         auto in = good(); in.firmwareBytes = 0x100001;
         assert(inspect(in).error == Error::FirmwareTooLarge);
+    }
+    {
+        auto in = good(); in.targetVerified = false;
+        assert(inspect(in).error == Error::TargetUnverified);
+    }
+    {
+        // Equal-length, caller-hash-matched Navi32 firmware must not run
+        // on an RX7600. The tested MP1 identity controls admission.
+        auto in = good(); in.targetMatch = false;
+        assert(inspect(in).error == Error::TargetMismatch);
     }
     return 0;
 }

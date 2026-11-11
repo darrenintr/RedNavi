@@ -30,6 +30,8 @@ enum class Error : uint8_t {
     DigestUntrusted,
     EmptyFirmware,
     FirmwareTooLarge,
+    TargetUnverified,
+    TargetMismatch,
 };
 
 struct Input {
@@ -40,6 +42,8 @@ struct Input {
     bool firmwarePresent = false;
     bool metadataVerified = false;
     bool digestTrusted = false;
+    bool targetVerified = false; // separately reviewed full-source SHA -> MP1
+    bool targetMatch = false;    // generated MP1 == actual IP Discovery MP1
     uint64_t firmwareBytes = 0;
     uint64_t stageBytes = 0;
 };
@@ -73,6 +77,12 @@ inline Report inspect(const Input &in) {
     if (!in.stageBytes || in.stageBytes > kStageMaxBytes ||
         in.firmwareBytes > in.stageBytes) {
         r.error = Error::FirmwareTooLarge; return r;
+    }
+    if (!in.targetVerified) {
+        r.error = Error::TargetUnverified; return r;
+    }
+    if (!in.targetMatch) {
+        r.error = Error::TargetMismatch; return r;
     }
     r.mayStage = true;
     r.mayLoadPmfw = true;
