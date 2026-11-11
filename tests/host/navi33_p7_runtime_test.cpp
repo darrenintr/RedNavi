@@ -39,7 +39,9 @@ int main() {
         assert(sanitizeStep(18) == 18u);
         assert(sanitizeStep(19) == 19u);
         assert(sanitizeStep(20) == 20u);
-        assert(sanitizeStep(21) == 0u);
+        assert(sanitizeStep(21) == 21u);
+        assert(sanitizeStep(22) == 22u);
+        assert(sanitizeStep(23) == 0u);
     }
     {
         auto r = inspect(Input{});
@@ -184,7 +186,7 @@ int main() {
         assert(r.error == Error::Ok);
         assert(r.mayStartQueues);
     }
-    for (uint32_t step = 18u; step <= 20u; ++step) {
+    for (uint32_t step = 18u; step <= 22u; ++step) {
         auto in = ready(step);
         in.secureOsAlive = true;
         const auto r = inspect(in);
