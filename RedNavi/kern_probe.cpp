@@ -110,6 +110,7 @@
 #include "navi33_p76_sdma_th1.h"
 #include "navi33_p77_gc_pfp.h"
 #include "navi33_p78_gc_pfp_p0.h"
+#include "navi33_p79_gc_pfp_p1.h"
 #include "navi33_p7_pmfw.h"
 #include "navi33_p6_psp_boot_plan.h"
 #include "navi33_p6_psp_staging.h"
@@ -6386,8 +6387,189 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-p7-gc-pfp-p0-runtime",
                           p78Names, p78Values,
                           sizeof(p78Values) / sizeof(p78Values[0]));
-                // P0 alone is not GC microcode completion: P1, ME/MEC/RLC
-                // and scheduler firmware are still missing. No queue start.
+                // P7.9: GC11.0.2 RS64 PFP P1_STACK uses the same
+                // GFX2.0 data slice as PSP-accepted P0_STACK,
+                // but requires a separate type=91 PSP command at fence8.
+                // No engines or graphics queues run at Step 11.
+                // Independent explicit boot arg after seventh fence.
+                uint32_t p79OptInRaw = 0u;
+                const bool p79OptIn =
+                    PE_parse_boot_argn(
+                        "rednavi_navi33_p79_pfp_p1",
+                        &p79OptInRaw, sizeof(p79OptInRaw)) &&
+                    p79OptInRaw == 1u;
+                rn_navi33::p79_gc_pfp_p1::Input p79Input{};
+                p79Input.requested = p7StepArg >= 11u;
+                p79Input.explicitOptIn = p79OptIn;
+                p79Input.identityVerified = p78Input.identityVerified;
+                p79Input.observedGcMajor = p78Input.observedGcMajor;
+                p79Input.observedGcMinor = p78Input.observedGcMinor;
+                p79Input.observedGcRevision = p78Input.observedGcRevision;
+                p79Input.pspRingReady = p78Input.pspRingReady;
+                p79Input.tmrAccepted = p74Accepted;
+                p79Input.sdmaBothAccepted = p78Input.sdmaBothAccepted;
+                p79Input.pfpAccepted = p77Accepted;
+                p79Input.p0Accepted = p78Accepted;
+                p79Input.previousFenceExpected = p78FenceExpected;
+                p79Input.previousFenceObserved = p78FenceObserved;
+                p79Input.transportHealthy =
+                    p78FenceOk && p78ResponseValid &&
+                    p78TransportError == 0u &&
+                    !p78Quarantined && !p7SubmitTransportQuarantined;
+                p79Input.stageOwnerRetained = p78Input.stageOwnerRetained;
+                p79Input.stageMapped = p78Input.stageMapped;
+                p79Input.stagePteVerified = p78Input.stagePteVerified;
+                p79Input.stageBytes = p78Input.stageBytes;
+                p79Input.stageGpuVa = p78Input.stageGpuVa;
+                p79Input.gartStart = p78Input.gartStart;
+                p79Input.gartEnd = p78Input.gartEnd;
+                p79Input.firmwarePresent = p78Input.firmwarePresent;
+                p79Input.firmwareMetadataVerified =
+                    p78Input.firmwareMetadataVerified;
+                p79Input.firmwareSourceVerified =
+                    p78Input.firmwareSourceVerified;
+                p79Input.firmwareIpMajor = p78Input.firmwareIpMajor;
+                p79Input.firmwareIpMinor = p78Input.firmwareIpMinor;
+                p79Input.firmwareIpRevision = p78Input.firmwareIpRevision;
+#if defined(RN_HAVE_NAVI33_GC_PFP_FW) && \
+    defined(RN_NAVI33_GC_PFP_FW_METADATA_V1)
+                p79Input.firmwareBytes = kRNNavi33GcPfpDataBytes;
+#endif
+                const auto p79Gate =
+                    rn_navi33::p79_gc_pfp_p1::inspect(p79Input);
+
+                bool p79FenceOk = false;
+                bool p79Submitted = false;
+                bool p79ResponseValid = false;
+                bool p79Accepted = false;
+                uint32_t p79Status = 0xffffffffu;
+                uint32_t p79FwAddrLo = 0u, p79FwAddrHi = 0u;
+                uint32_t p79TransportError = 0u;
+                bool p79Quarantined = p7SubmitTransportQuarantined;
+                uint32_t p79WptrBefore = 0u, p79WptrAfter = 0u;
+                uint32_t p79RptrBefore = 0u, p79RptrAfterKick = 0u;
+                uint32_t p79RptrFinal = 0u;
+                uint32_t p79FenceBefore = 0u, p79FenceExpected = 0u;
+                uint32_t p79FenceObserved = 0u, p79FencePolls = 0u;
+
+#ifdef RN_HAVE_NAVI33_GC_PFP_FW
+                if (p79Gate.mayLoad &&
+                    pspFence == rn_navi33::p79_gc_pfp_p1::kPriorFence &&
+                    !p7SubmitTransportQuarantined &&
+                    navi33PmfwBuf && navi33PmfwBuf->getBytesNoCopy() &&
+                    sizeof(kRNNavi33GcPfpDataFw) ==
+                        static_cast<size_t>(kRNNavi33GcPfpDataBytes)) {
+                    // PFP P0 Stack (type=90) was accepted at fence=7.
+                    // PSP owns the prior firmware in TMR. Reuse retained
+                    // DMA staging for the same 139264-byte P1 data
+                    // with a separate PSP LOAD_IP_FW(type 91).
+                    uint8_t *const stage = static_cast<uint8_t *>(
+                        navi33PmfwBuf->getBytesNoCopy());
+                    memset(stage, 0, navi33PmfwStageBytes);
+                    memcpy(stage, kRNNavi33GcPfpDataFw,
+                           kRNNavi33GcPfpDataBytes);
+                    __sync_synchronize();
+
+                    uint32_t resp[4] = {
+                        0xffffffffu, 0xffffffffu,
+                        0xffffffffu, 0xffffffffu
+                    };
+                    p79FenceOk = pspSubmitP7(
+                        p71RingGpuVa, p71CmdGpuVa, p71FenceGpuVa,
+                        rn_navi33::p79_gc_pfp_p1::kCommandId,
+                        p79Gate.words,
+                        rn_navi33::p79_gc_pfp_p1::kArgumentCount,
+                        resp, 4u);
+                    p79Submitted = p7SubmitWasIssued;
+                    p79ResponseValid = p7SubmitResponseValid;
+                    p79TransportError = p7SubmitTransportError;
+                    p79Quarantined = p7SubmitTransportQuarantined;
+                    p79WptrBefore = p7SubmitWptrBefore;
+                    p79WptrAfter = p7SubmitWptrAfter;
+                    p79RptrBefore = p7SubmitRptrBefore;
+                    p79RptrAfterKick = p7SubmitRptrAfterKick;
+                    p79RptrFinal = p7SubmitRptrFinal;
+                    p79FenceBefore = p7SubmitFenceBefore;
+                    p79FenceExpected = p7SubmitFenceExpected;
+                    p79FenceObserved = p7SubmitFenceObserved;
+                    p79FencePolls = p7SubmitPolls;
+                    if (p79ResponseValid) {
+                        p79Status = resp[0];
+                        p79FwAddrLo = resp[2];
+                        p79FwAddrHi = resp[3];
+                    }
+                    p79Accepted = p79FenceOk && p79ResponseValid &&
+                        p79Status == 0u &&
+                        p79FenceExpected ==
+                            rn_navi33::p79_gc_pfp_p1::kExpectedFence &&
+                        p79FenceObserved ==
+                            rn_navi33::p79_gc_pfp_p1::kExpectedFence;
+                } else if (p79Gate.mayLoad) {
+                    p79TransportError = 10u;
+                }
+#endif
+
+                const char *const p79Names[] = {
+                    "step", "gate_error", "requested", "explicit_opt_in",
+                    "may_load", "firmware_present", "metadata_verified",
+                    "source_verified", "observed_gc_revision",
+                    "firmware_gc_revision", "firmware_version",
+                    "firmware_bytes", "stage_capacity", "stage_mapped",
+                    "stage_pte_verified", "stage_va_lo", "stage_va_hi",
+                    "command_id", "fw_type", "prior_fence_expected",
+                    "prior_fence_observed", "pfp_accepted",
+                    "p0_accepted", "sdma_both_accepted", "submitted",
+                    "submit_wptr_before", "submit_wptr_after",
+                    "submit_rptr_before", "submit_rptr_after_kick",
+                    "submit_rptr_final", "fence_before", "fence_expected",
+                    "fence_observed", "fence_polls", "fence_ok",
+                    "response_valid", "status", "fw_addr_lo", "fw_addr_hi",
+                    "transport_error", "transport_quarantined",
+                    "accepted", "gc_pfp_p1_loaded",
+                    "gc_engine_started"
+                };
+                const uint32_t p79Values[] = {
+                    p7StepArg, static_cast<uint32_t>(p79Gate.error),
+                    static_cast<uint32_t>(p79Input.requested),
+                    static_cast<uint32_t>(p79OptIn),
+                    static_cast<uint32_t>(p79Gate.mayLoad),
+                    static_cast<uint32_t>(p79Input.firmwarePresent),
+                    static_cast<uint32_t>(p79Input.firmwareMetadataVerified),
+                    static_cast<uint32_t>(p79Input.firmwareSourceVerified),
+                    p79Input.observedGcRevision,
+                    p79Input.firmwareIpRevision, p77FwVersion,
+                    static_cast<uint32_t>(p79Input.firmwareBytes),
+                    static_cast<uint32_t>(p79Input.stageBytes),
+                    static_cast<uint32_t>(p79Input.stageMapped),
+                    static_cast<uint32_t>(p79Input.stagePteVerified),
+                    static_cast<uint32_t>(p79Input.stageGpuVa),
+                    static_cast<uint32_t>(p79Input.stageGpuVa >> 32),
+                    rn_navi33::p79_gc_pfp_p1::kCommandId,
+                    rn_navi33::p79_gc_pfp_p1::kFirmwareType,
+                    p79Input.previousFenceExpected,
+                    p79Input.previousFenceObserved,
+                    static_cast<uint32_t>(p77Accepted),
+                    static_cast<uint32_t>(p78Accepted),
+                    static_cast<uint32_t>(p79Input.sdmaBothAccepted),
+                    static_cast<uint32_t>(p79Submitted),
+                    p79WptrBefore, p79WptrAfter,
+                    p79RptrBefore, p79RptrAfterKick, p79RptrFinal,
+                    p79FenceBefore, p79FenceExpected,
+                    p79FenceObserved, p79FencePolls,
+                    static_cast<uint32_t>(p79FenceOk),
+                    static_cast<uint32_t>(p79ResponseValid),
+                    p79Status, p79FwAddrLo, p79FwAddrHi,
+                    p79TransportError, static_cast<uint32_t>(p79Quarantined),
+                    static_cast<uint32_t>(p79Accepted),
+                    static_cast<uint32_t>(p79Accepted),
+                    0u
+                };
+                rnPublish(this, "navi33-p7-gc-pfp-p1-runtime",
+                          p79Names, p79Values,
+                          sizeof(p79Values) / sizeof(p79Values[0]));
+                // Both PFP data stacks accepted by PSP does not mean
+                // GC firmware is complete or executable. ME/MEC/RLC/MES
+                // and command queue programming remain disabled.
                 const auto postGate =
                     rn_navi33::p7_postpsp::inspect(postInput);
 
