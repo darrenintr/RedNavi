@@ -24,7 +24,8 @@ int main() {
         assert(sanitizeStep(3) == 3u);
         assert(sanitizeStep(4) == 4u);
         assert(sanitizeStep(5) == 5u);
-        assert(sanitizeStep(6) == 0u);
+        assert(sanitizeStep(6) == 6u);
+        assert(sanitizeStep(7) == 0u);
     }
     {
         auto r = inspect(Input{});
@@ -83,6 +84,13 @@ int main() {
         assert(r.error == Error::Ok);
         assert(r.mayProgramGart);
         assert(r.mayIssuePspBootloader);
+        assert(r.mayStartQueues);
+    }
+    {
+        auto in = ready(6);
+        in.secureOsAlive = true;
+        auto r = inspect(in);
+        assert(r.error == Error::Ok);
         assert(r.mayStartQueues);
     }
     {

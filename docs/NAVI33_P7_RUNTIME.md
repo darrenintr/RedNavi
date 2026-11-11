@@ -501,3 +501,82 @@ A successful Step 5 should demonstrate `target_match=1`,
 cannot establish that the real RX7600 has completed the PSP command.
 The following work is a retained TMR reservation and SETUP_TMR;
 Step 6 is not implemented and cannot be enabled by a boot argument.
+
+
+
+## 0.0.23 — P7.4 Step 6: experimental SETUP_TMR
+
+The RX 7600 P7.3 test on 2026-11-11 confirmed all four PSP13
+bootloader steps, a successful LOAD_TOC, accepted Navi33 PMFW,
+a fence transition 1 -> 2, ring RPTR 16 -> 32, and the post-PSP
+`may_setup_tmr=1` admission. The TMR plan from that card is:
+`tmr_bytes=0x01300000`, VRAM offset `0x0d100000`,
+GPU MC `0x800d100000`, GPU VRAM physical `0x0d100000`.
+
+Linux references:
+- `drivers/gpu/drm/amd/amdgpu/amdgpu_psp.c`
+  `psp_prep_tmr_cmd_buf`: `GFX_CMD_ID_SETUP_TMR=0x05`,
+  `buf_phy_addr_lo/hi=tmr_mc`, `buf_size=tmr_bo.size`,
+  `virt_phy_addr=1`, `system_phy_addr_lo/hi=amdgpu_gmc_vram_pa()`.
+- `drivers/gpu/drm/amd/amdgpu/psp_gfx_if.h`
+  `struct psp_gfx_cmd_setup_tmr` has exactly six DWORDs,
+  with `virt_phy_addr` at flag **bit 1** (`0x2`).
+
+These addresses are **different address domains**: MC is the GPU
+framebuffer-MC address, PA is the GPU VRAM physical offset translated
+from FB_OFFSET, and neither field is a CPU BAR0 physical address.
+
+Step 6 is a separate opt-in:
+```text
+rednavi_navi33_p7_step=6
+```
+This **alone does not issue SETUP_TMR**. It publishes the read-only
+`navi33-p7-tmr-runtime` admission report with `gate_error=2`
+(`NoExplicitOptIn`). To execute the PSP command, add:
+```text
+rednavi_navi33_p74_setup_tmr=1
+```
+
+The new pure policy verifies exact IP Discovery, completed PSP sOS,
+GPCOM ring, prior PMFW acceptance, previous fence 2, quiescence, full
+TMR ownership, 1 MiB size/alignment, exact Linux MC/PA translations,
+and containment in the exclusive free left-tail carve. Any failure
+blocks the third GPCOM write. This experiment does not automatically
+start GC, SDMA, MES, or create graphics queues. Keep a bootable
+0.0.22 fallback EFI; a failed PSP transaction may hang the only GPU.
+
+If SETUP_TMR succeeds:
+```text
+navi33-p7-tmr-runtime:
+  step = 6
+  gate_error = 0
+  may_issue = 1
+  command_id = 5
+  tmr_size = 19922944
+  tmr_mc_lo = 219152384
+  tmr_mc_hi = 128
+  tmr_pa_lo = 219152384
+  tmr_pa_hi = 0
+  tmr_flags = 2
+  prior_fence_expected = 2
+  prior_fence_observed = 2
+  submitted = 1
+  fence_expected = 3
+  fence_observed = 3
+  response_valid = 1
+  fence_ok = 1
+  status = 0
+  accepted = 1
+```
+
+After acceptance `navi33-p7-postpsp-runtime` advances from
+`post_gate_error=11` (TmrNotAccepted) to `12`
+(IpFirmwareIncomplete), and `may_load_ip_fw=1`. This only
+authorizes **future development**, not immediate graphics firmware
+execution. Unexpected timeouts quarantine the shared PSP ring,
+and no further commands may be sent before reboot.
+
+Note: the current visible-VRAM free-range ledger is a software
+ownership contract, not an implementation of a full operating-system
+VRAM allocator. Do not run the experiment if another GPU owner or
+another driver may concurrently allocate the candidate region.

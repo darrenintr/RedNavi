@@ -245,6 +245,8 @@ test:
 	./build/navi33_p7_postpsp_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p7_tmr_plan_test.cpp -o build/navi33_p7_tmr_plan_test
 	./build/navi33_p7_tmr_plan_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p74_setup_tmr_test.cpp -o build/navi33_p74_setup_tmr_test
+	./build/navi33_p74_setup_tmr_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p7_pmfw_test.cpp -o build/navi33_p7_pmfw_test
 	./build/navi33_p7_pmfw_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_linux_boot_parity_test.cpp -o build/navi33_linux_boot_parity_test

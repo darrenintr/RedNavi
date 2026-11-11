@@ -105,6 +105,7 @@
 #include "navi33_p7_runtime.h"
 #include "navi33_p7_postpsp.h"
 #include "navi33_p7_tmr_plan.h"
+#include "navi33_p74_setup_tmr.h"
 #include "navi33_p7_pmfw.h"
 #include "navi33_p6_psp_boot_plan.h"
 #include "navi33_p6_psp_staging.h"
@@ -5507,6 +5508,148 @@ bool RedNaviProbe::start(IOService *provider) {
                 postInput.fbStart = stageGeometry.geometry.mcStart.value;
                 postInput.fbBytes = stageGeometry.geometry.usableVramBytes;
                 postInput.pmfwLoaded = p73PmfwAccepted;
+                // P7.4: third GPCOM command, isolated from the validated
+                // PMFW checkpoint. Requires both P7 step 6 and a second,
+                // explicit hardware-write opt-in. Step 6 without that flag
+                // publishes a read-only admission report.
+                const auto p74Prereq =
+                    rn_navi33::p7_postpsp::inspect(postInput);
+                uint32_t p74OptInValue = 0;
+                const bool p74OptIn =
+                    PE_parse_boot_argn(
+                        "rednavi_navi33_p74_setup_tmr",
+                        &p74OptInValue, sizeof(p74OptInValue)) &&
+                    p74OptInValue == 1u;
+                rn_navi33::p74_tmr::Input p74Input{};
+                p74Input.requested = p7StepArg >= 6u;
+                p74Input.explicitOptIn = p74OptIn;
+                p74Input.identityVerified =
+                    check.eligibleForComputeBringup();
+                p74Input.pspReady =
+                    p7PspOk && p71RingCreated && p71RuntimeMapped;
+                p74Input.postPspMaySetupTmr =
+                    p74Prereq.maySetupTmr;
+                p74Input.pmfwAccepted = p73PmfwAccepted;
+                p74Input.transportHealthy =
+                    p73FenceOk && p7SubmitResponseValid &&
+                    p7SubmitTransportError == 0u &&
+                    !p7SubmitTransportQuarantined;
+                p74Input.previousFenceExpected = p7SubmitFenceExpected;
+                p74Input.previousFenceObserved = p7SubmitFenceObserved;
+                p74Input.tmrOwnershipVerified =
+                    p72Tmr.ownershipVerified;
+                p74Input.allocatorQuiescent = carve.quiescent;
+                p74Input.carveVerified = carve.carveVerified;
+                p74Input.naturalAligned = p72Tmr.naturalAligned;
+                p74Input.noOverlap = p72Tmr.noOverlap;
+                p74Input.tocBytes = p71TmrBytes;
+                p74Input.tmrBytes = p72Tmr.candidate.bytes;
+                p74Input.tmrOffset = p72Tmr.candidate.offset;
+                p74Input.mc = p72Tmr.mc;
+                p74Input.pa = p72Tmr.pa;
+                p74Input.mcStart = p72TmrInput.mcStart;
+                p74Input.physBase = p72TmrInput.vramPhysBase;
+                p74Input.visibleBytes = p72TmrInput.cpuVisibleBytes;
+                p74Input.carveStart = carve.left.offset;
+                p74Input.carveBytes = carve.left.bytes;
+                const auto p74Gate =
+                    rn_navi33::p74_tmr::inspect(p74Input);
+
+                bool p74Submitted = false;
+                bool p74ResponseValid = false;
+                bool p74FenceOk = false;
+                bool p74Accepted = false;
+                uint32_t p74Status = 0xffffffffu;
+                uint32_t p74TransportError = 0u;
+                bool p74Quarantined = p7SubmitTransportQuarantined;
+                uint32_t p74WptrBefore = 0u;
+                uint32_t p74WptrAfter = 0u;
+                uint32_t p74RptrBefore = 0u;
+                uint32_t p74RptrFinal = 0u;
+                uint32_t p74FenceBefore = 0u;
+                uint32_t p74FenceExpected = 0u;
+                uint32_t p74FenceObserved = 0u;
+                uint32_t p74FencePolls = 0u;
+
+                if (p74Gate.mayIssue &&
+                    pspFence ==
+                        rn_navi33::p74_tmr::kExpectedPriorFence &&
+                    !p7SubmitTransportQuarantined) {
+                    // PSP13 psp_prep_tmr_cmd_buf() from amdgpu_psp.c:
+                    // GPU MC (not CPU BAR physical), size, bit 1 indicating
+                    // physical address supplied, then GPU VRAM PA.
+                    // The pure gate already verified each address domain
+                    // and that the 19 MiB VRAM tail is owned/quiescent.
+                    uint32_t p74Response[1] = {0xffffffffu};
+                    p74FenceOk = pspSubmitP7(
+                        p71RingGpuVa, p71CmdGpuVa, p71FenceGpuVa,
+                        rn_navi33::p74_tmr::kCommandId,
+                        p74Gate.words,
+                        rn_navi33::p74_tmr::kArgCount,
+                        p74Response, 1u);
+                    p74Submitted = p7SubmitWasIssued;
+                    p74ResponseValid = p7SubmitResponseValid;
+                    p74Status = p74Response[0];
+                    p74TransportError = p7SubmitTransportError;
+                    p74Quarantined = p7SubmitTransportQuarantined;
+                    p74WptrBefore = p7SubmitWptrBefore;
+                    p74WptrAfter = p7SubmitWptrAfter;
+                    p74RptrBefore = p7SubmitRptrBefore;
+                    p74RptrFinal = p7SubmitRptrFinal;
+                    p74FenceBefore = p7SubmitFenceBefore;
+                    p74FenceExpected = p7SubmitFenceExpected;
+                    p74FenceObserved = p7SubmitFenceObserved;
+                    p74FencePolls = p7SubmitPolls;
+                    p74Accepted =
+                        p74FenceOk && p74ResponseValid &&
+                        p74Status == 0u &&
+                        p74FenceExpected == 3u &&
+                        p74FenceObserved == 3u;
+                } else if (p74Gate.mayIssue) {
+                    // Fail closed: the ring was not freshly at fence 2.
+                    // Do not write another PSP command buffer.
+                    p74TransportError = 10u;
+                }
+
+                const char *const p74Names[] = {
+                    "step", "requested", "explicit_opt_in", "gate_error",
+                    "may_issue", "command_id", "tmr_size",
+                    "tmr_mc_lo", "tmr_mc_hi", "tmr_pa_lo", "tmr_pa_hi",
+                    "tmr_flags", "prior_fence_expected",
+                    "prior_fence_observed", "submitted",
+                    "submit_wptr_before", "submit_wptr_after",
+                    "submit_rptr_before", "submit_rptr_final",
+                    "fence_before", "fence_expected", "fence_observed",
+                    "fence_polls", "fence_ok", "response_valid",
+                    "status", "transport_error", "transport_quarantined",
+                    "accepted"
+                };
+                const uint32_t p74Values[] = {
+                    p7StepArg, static_cast<uint32_t>(p74Input.requested),
+                    static_cast<uint32_t>(p74OptIn),
+                    static_cast<uint32_t>(p74Gate.error),
+                    static_cast<uint32_t>(p74Gate.mayIssue),
+                    rn_navi33::p74_tmr::kCommandId,
+                    p74Gate.words[2], p74Gate.words[0],
+                    p74Gate.words[1], p74Gate.words[4],
+                    p74Gate.words[5], p74Gate.words[3],
+                    p74Input.previousFenceExpected,
+                    p74Input.previousFenceObserved,
+                    static_cast<uint32_t>(p74Submitted),
+                    p74WptrBefore, p74WptrAfter,
+                    p74RptrBefore, p74RptrFinal,
+                    p74FenceBefore, p74FenceExpected,
+                    p74FenceObserved, p74FencePolls,
+                    static_cast<uint32_t>(p74FenceOk),
+                    static_cast<uint32_t>(p74ResponseValid),
+                    p74Status, p74TransportError,
+                    static_cast<uint32_t>(p74Quarantined),
+                    static_cast<uint32_t>(p74Accepted)
+                };
+                rnPublish(this, "navi33-p7-tmr-runtime", p74Names, p74Values,
+                          sizeof(p74Values) / sizeof(p74Values[0]));
+
+                postInput.tmrAccepted = p74Accepted;
                 const auto postGate =
                     rn_navi33::p7_postpsp::inspect(postInput);
 
