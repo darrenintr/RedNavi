@@ -36,7 +36,9 @@ int main() {
         assert(sanitizeStep(15) == 15u);
         assert(sanitizeStep(16) == 16u);
         assert(sanitizeStep(17) == 17u);
-        assert(sanitizeStep(18) == 0u);
+        assert(sanitizeStep(18) == 18u);
+        assert(sanitizeStep(19) == 19u);
+        assert(sanitizeStep(20) == 0u);
     }
     {
         auto r = inspect(Input{});
@@ -180,6 +182,13 @@ int main() {
         auto r = inspect(in);
         assert(r.error == Error::Ok);
         assert(r.mayStartQueues);
+    }
+    for (uint32_t step : {18u, 19u}) {
+        auto in = ready(step);
+        in.secureOsAlive = true;
+        const auto r = inspect(in);
+        assert(r.error == Error::Ok);
+        assert(r.mayIssuePspBootloader);
     }
     {
         auto in = ready(3);
