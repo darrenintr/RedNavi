@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-only tests for pinned GC11.0.2 RS64 MECC generator."""
+"""Host-only tests for pinned GC11.0.2 RS64 MEC generator."""
 import hashlib
 import importlib.util
 from pathlib import Path
@@ -73,7 +73,7 @@ class Navi33GcMecTests(unittest.TestCase):
                 src.write_bytes(data)
                 GEN.generate(src, dst)
                 output = dst.read_text()
-                self.assertIn("RN_NAVI33_GC_ME_FW_SOURCE_VERIFIED 1", output)
+                self.assertIn("RN_NAVI33_GC_MEC_FW_SOURCE_VERIFIED 1", output)
                 self.assertIn("kRNNavi33GcMecIpRevision 2u", output)
                 self.assertIn("kRNNavi33GcMecCodeBytes 267008u", output)
                 self.assertIn("kRNNavi33GcMecDataBytes 139264u", output)

@@ -100,7 +100,7 @@ def generate(source, target):
     parsed = parse_image(data)
     digest = hashlib.sha256(data).hexdigest()
     with Path(target).open("w", encoding="utf-8") as f:
-        f.write("// Generated locally from pinned Navi33 GC11.0.2 ME; DO NOT COMMIT.\n")
+        f.write("// Generated locally from pinned Navi33 GC11.0.2 MEC; DO NOT COMMIT.\n")
         f.write("#define RN_NAVI33_GC_MEC_FW_METADATA_V1 1\n")
         f.write("#define RN_NAVI33_GC_MEC_FW_SOURCE_VERIFIED 1\n")
         f.write("#define kRNNavi33GcMecIpMajor 11u\n")
@@ -132,7 +132,7 @@ def generate(source, target):
     print(
         f"Navi33 GC11.0.2 RS64 MEC v{parsed['version']}; "
         f"code {parsed['code_bytes']} B; data {parsed['data_bytes']} B "
-        f"(ME P0/P1 stage available); Git blob {actual}; SHA-256 {digest}")
+        f"(MEC P0-P7 stacks available; no stack submitted here); Git blob {actual}; SHA-256 {digest}")
 
 
 def main(argv=None):
