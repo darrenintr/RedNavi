@@ -45,9 +45,9 @@ class RlcTests(unittest.TestCase):
             elif field == "overlap":
                 struct.pack_into("<I", src, 24, 48)
             elif field == "unaligned":
-                struct.pack_into("<I", src, 28, 129)
+                struct.pack_into("<I", src, 24, 129)
             elif field == "zero":
-                struct.pack_into("<I", src, 24, 0)
+                struct.pack_into("<I", src, 20, 0)
             with self.subTest(field=field), self.assertRaises(ValueError):
                 M.parse_image(src)
 
