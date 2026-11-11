@@ -321,6 +321,8 @@ class RedNaviProbe : public IOService {
     uint64_t navi33PmfwStageBytes {0};
     bool navi33PmfwPrepared {false};
     bool navi33PmfwMapped {false};
+    // Once a PTE points at this backing, retain it even after a failed flush.
+    // PMFW admission and DMA exposure are separate notions.
 
     // Last P7 GPCOM submission telemetry.
     uint32_t p7SubmitWptrBefore {0};
@@ -332,6 +334,10 @@ class RedNaviProbe : public IOService {
     uint32_t p7SubmitFenceExpected {0};
     uint32_t p7SubmitFenceObserved {0};
     uint32_t p7SubmitPolls {0};
+    bool p7SubmitWasIssued {false};
+    bool p7SubmitResponseValid {false};
+    bool p7SubmitTransportQuarantined {false};
+    uint32_t p7SubmitTransportError {0};
     // P6.5 software-only VRAM reservation. These offsets are bookkeeping
     // claims only; P4 never writes them or exposes them to the GPU.
     bool navi33VramLedgerOwned {false};
@@ -808,7 +814,8 @@ bool RedNaviProbe::prepareNavi33PmfwDma(
 }
 
 bool RedNaviProbe::createPspRingP7(uint64_t ringGpuVa) {
-    if (!navi33PspRuntimePrepared || !navi33PspRuntimeBuf)
+    if (!navi33PspRuntimePrepared || !navi33PspRuntimeBuf ||
+        p7SubmitTransportQuarantined)
         return false;
     uint32_t mp0 = 0;
     if (!ipBase(kRNHwIdMp0, &mp0)) return false;
@@ -830,12 +837,14 @@ bool RedNaviProbe::createPspRingP7(uint64_t ringGpuVa) {
     uint8_t *base = static_cast<uint8_t *>(
         navi33PspRuntimeBuf->getBytesNoCopy());
     memset(base, 0, kRNPspRingSize);
-    OSSynchronizeIO();
+    __sync_synchronize();
 
     wr(r69, static_cast<uint32_t>(ringGpuVa));
     wr(r70, static_cast<uint32_t>(ringGpuVa >> 32));
     wr(r71, kRNPspRingSize);
     wr(r64, kRNPspRingTypeKm << 16);
+    // PSP13 bootloader-to-sOS ring-create handshake needs settling time.
+    IOSleep(20);
 
     for (uint32_t ms = 0; ms < 2000u; ++ms) {
         status = rd(r64);
@@ -849,9 +858,20 @@ bool RedNaviProbe::pspSubmitP7(
     uint64_t ringGpuVa, uint64_t cmdGpuVa, uint64_t fenceGpuVa,
     uint32_t cmdId, const uint32_t *args, uint32_t nargs,
     uint32_t *resp, uint32_t nresp) {
-    if (!navi33PspRuntimePrepared || !navi33PspRuntimeBuf ||
-        nargs > 64u || nresp > 64u)
+    p7SubmitWasIssued = false;
+    p7SubmitResponseValid = false;
+    p7SubmitTransportError = 1u; // prerequisites unavailable
+    if (p7SubmitTransportQuarantined) {
+        p7SubmitTransportError = 9u; // never reuse a live command after timeout
         return false;
+    }
+    if (!navi33PspRuntimePrepared || !navi33PspRuntimeBuf ||
+        nargs > 64u || nresp > 64u ||
+        (nargs && !args) || (nresp && !resp))
+        return false;
+    // A timed-out PSP operation has no valid response words.
+    for (uint32_t n = 0; n < nresp; ++n)
+        resp[n] = 0xffffffffu;
 
     uint32_t mp0 = 0;
     if (!ipBase(kRNHwIdMp0, &mp0)) return false;
@@ -871,7 +891,7 @@ bool RedNaviProbe::pspSubmitP7(
     // than forcing the shared fence back to zero.
     volatile uint32_t *fenceValue =
         reinterpret_cast<volatile uint32_t *>(fence);
-    OSSynchronizeIO();
+    __sync_synchronize();
     p7SubmitFenceBefore = *fenceValue;
 
     *reinterpret_cast<uint32_t *>(cmd + 8) = cmdId;
@@ -888,7 +908,10 @@ bool RedNaviProbe::pspSubmitP7(
     p7SubmitFenceExpected = 0;
     p7SubmitFenceObserved = p7SubmitFenceBefore;
     p7SubmitPolls = 0;
-    if ((wptr & 15u) || wptr >= ringDw) return false;
+    if ((wptr & 15u) || wptr >= ringDw) {
+        p7SubmitTransportError = 4u;
+        return false;
+    }
 
     uint8_t *frame = ring + static_cast<uint64_t>(wptr) * 4;
     memset(frame, 0, 64);
@@ -903,17 +926,18 @@ bool RedNaviProbe::pspSubmitP7(
     const uint32_t index = ++pspFence;
     p7SubmitFenceExpected = index;
     *reinterpret_cast<uint32_t *>(frame + 20) = index;
-    OSSynchronizeIO();
+    __sync_synchronize();
 
     const uint32_t nextWptr = (wptr + 16u) % ringDw;
     wr(r67, nextWptr);
+    p7SubmitWasIssued = true;
     p7SubmitWptrAfter = rd(r67);
     p7SubmitRptrAfterKick = rd(r68);
 
     uint32_t observed = p7SubmitFenceBefore;
     for (uint32_t ms = 0;
          ms < rn_navi33::p7_pmfw::kFenceTimeoutMs; ++ms) {
-        OSSynchronizeIO();
+        __sync_synchronize();
         observed = *fenceValue;
         p7SubmitFenceObserved = observed;
         p7SubmitPolls = ms + 1u;
@@ -921,12 +945,28 @@ bool RedNaviProbe::pspSubmitP7(
         IOSleep(1);
     }
 
+    // The last 1-ms sleep can complete the command after the last sample.
+    if (observed != index) {
+        __sync_synchronize();
+        observed = *fenceValue;
+        p7SubmitFenceObserved = observed;
+        ++p7SubmitPolls;
+    }
     p7SubmitRptrFinal = rd(r68);
-    OSSynchronizeIO();
+    p7SubmitResponseValid = observed == index;
+    if (!p7SubmitResponseValid) {
+        // The PSP can still own the ring frame and command DMA page.
+        // Do not overwrite either one until the GPU is reset at reboot.
+        p7SubmitTransportQuarantined = true;
+        p7SubmitTransportError = 8u;
+        return false;
+    }
+    __sync_synchronize();
     for (uint32_t n = 0; n < nresp; ++n)
         resp[n] = *reinterpret_cast<volatile uint32_t *>(
             cmd + 864 + n * 4);
-    return observed == index;
+    p7SubmitTransportError = 0u;
+    return true;
 }
 
 void RedNaviProbe::dumpPci() {
@@ -2135,6 +2175,17 @@ void RedNaviProbe::loadSmuFw() {
         IOLog("RedNavi: SMU firmware load not requested (boot-arg rednavi_smu_load=1)\n");
         return;
     }
+#if defined(RN_SMU_FW_METADATA_V2)
+    // The legacy Navi32 SMU path must never consume a Navi33 PMFW header.
+    if (kRNSmuFwTargetMp1Major != 13u ||
+        kRNSmuFwTargetMp1Minor != 0u ||
+        kRNSmuFwTargetMp1Revision != 10u ||
+        RN_SMU_FW_TARGET_VERIFIED != 1 ||
+        RN_SMU_FW_DIGEST_TRUSTED != 1) {
+        IOLog("RedNavi: legacy Navi32 SMU loader rejected firmware target\n");
+        return;
+    }
+#endif
     if (kRNSmuFwSize > kRNPspBufSize) { IOLog("RedNavi: SMU firmware does not fit the staging buffer\n"); return; }
     for (uint32_t off = 0; off < kRNPspBufSize; off += 4) vramWrite(kRNPspBufVramOffset + off, 0);
     for (uint32_t off = 0; off < kRNSmuFwSize; off += 4) {
@@ -4798,6 +4849,9 @@ bool RedNaviProbe::start(IOService *provider) {
                     // Every PTE outside fw_pri starts invalid. The first 256
                     // entries map the exact retained IODMACommand page list;
                     // they are deliberately NOT derived from first_iova.
+                    // The device may still see these PTEs after a later
+                    // readback/invalidation failure. Keep fw_pri DMA pinned.
+                    navi33P7GartProgrammed = true;
                     rn_gart_clear(&gpu, &p7Gmc);
                     for (uint32_t p = 0; p < navi33FwPriPageCount; ++p)
                         rn_gart_map_page(&gpu, &p7Gmc, p,
@@ -4935,12 +4989,12 @@ bool RedNaviProbe::start(IOService *provider) {
                             // GTT for PSP13. The P7 GART PTEs are
                             // SYSTEM+SNOOPED, so x86 cache-coherent host
                             // memory is intentionally used here as well.
-                            OSSynchronizeIO();
+                            __sync_synchronize();
 
                             const uint32_t before81 = rd(r81);
                             wr(r36, static_cast<uint32_t>(
                                 gartPlan.fwPriGpuAddress >> 20));
-                            OSSynchronizeIO();
+                            __sync_synchronize();
                             p7LastC36 = rd(r36);
                             wr(r35, component.cmd);
 
@@ -5049,14 +5103,28 @@ bool RedNaviProbe::start(IOService *provider) {
                 bool p73PmfwPresent = false;
                 bool p73PmfwMetadataVerified = false;
                 bool p73PmfwDigestTrusted = false;
+                bool p73PmfwTargetVerified = false;
+                bool p73PmfwTargetMatch = false;
+                uint32_t p73PmfwTargetRevision = 0;
+                uint32_t p73HardwareMp1Revision =
+                    static_cast<uint32_t>(check.observed.smu.revision);
                 uint32_t p73PmfwVersion = 0;
                 uint32_t p73PmfwBytes = 0;
 #if defined(RN_HAVE_SMU_FW)
                 p73PmfwPresent = true;
-#if defined(RN_SMU_FW_METADATA_V1)
+#if defined(RN_SMU_FW_METADATA_V2)
                 p73PmfwMetadataVerified = true;
                 p73PmfwDigestTrusted =
                     RN_SMU_FW_DIGEST_TRUSTED == 1;
+                p73PmfwTargetVerified =
+                    RN_SMU_FW_TARGET_VERIFIED == 1;
+                p73PmfwTargetRevision =
+                    kRNSmuFwTargetMp1Revision;
+                p73PmfwTargetMatch =
+                    check.eligibleForComputeBringup() &&
+                    kRNSmuFwTargetMp1Major == check.observed.smu.major &&
+                    kRNSmuFwTargetMp1Minor == check.observed.smu.minor &&
+                    kRNSmuFwTargetMp1Revision == check.observed.smu.revision;
                 p73PmfwVersion = kRNSmuFwVersion;
                 p73PmfwBytes = kRNSmuFwSize;
 #endif
@@ -5098,6 +5166,9 @@ bool RedNaviProbe::start(IOService *provider) {
                     p7GartReady && p7PspOk &&
                     prepareNavi33PspRuntimeDma(&p71MappingError)) {
                     bool ptesOk = true;
+                    // Latch exposure before the first PTE can point to DMA.
+                    // This does not claim that MMHUB invalidation succeeded.
+                    navi33PspRuntimeMapped = true;
                     for (uint32_t p = 0;
                          p < rn_navi33::p7_postpsp::kRuntimePages; ++p) {
                         const uint32_t index =
@@ -5121,6 +5192,8 @@ bool RedNaviProbe::start(IOService *provider) {
                         p73PmfwPresent &&
                         p73PmfwMetadataVerified &&
                         p73PmfwDigestTrusted &&
+                        p73PmfwTargetVerified &&
+                        p73PmfwTargetMatch &&
                         prepareNavi33PmfwDma(
                             kRNSmuFwSize, &p73MappingError)) {
                         p73StagePrepared = true;
@@ -5132,6 +5205,8 @@ bool RedNaviProbe::start(IOService *provider) {
                         OSSynchronizeIO();
 
                         bool stagePtesOk = true;
+                        // Even partial PTE installation pins this backing.
+                        navi33PmfwMapped = true;
                         for (uint32_t p = 0;
                              p < navi33PmfwPageCount; ++p) {
                             const uint32_t index =
@@ -5280,6 +5355,8 @@ bool RedNaviProbe::start(IOService *provider) {
                 p73Input.metadataVerified =
                     p73PmfwMetadataVerified;
                 p73Input.digestTrusted = p73PmfwDigestTrusted;
+                p73Input.targetVerified = p73PmfwTargetVerified;
+                p73Input.targetMatch = p73PmfwTargetMatch;
                 p73Input.firmwareBytes = p73PmfwBytes;
                 p73Input.stageBytes =
                     rn_navi33::p7_pmfw::alignPage(p73PmfwBytes);
@@ -5306,6 +5383,9 @@ bool RedNaviProbe::start(IOService *provider) {
                 p7SubmitFenceExpected = 0;
                 p7SubmitFenceObserved = 0;
                 p7SubmitPolls = 0;
+                p7SubmitWasIssued = false;
+                p7SubmitResponseValid = false;
+                p7SubmitTransportError = 0;
 
 #if defined(RN_HAVE_SMU_FW)
                 if (p73Gate.mayLoadPmfw &&
@@ -5346,8 +5426,9 @@ bool RedNaviProbe::start(IOService *provider) {
                     "step", "error", "requested", "psp_ready",
                     "toc_accepted", "tmr_ownership_verified",
                     "firmware_present", "metadata_verified",
-                    "digest_trusted", "firmware_version",
-                    "firmware_bytes",
+                    "digest_trusted", "target_verified", "target_match",
+                    "firmware_mp1_revision", "hardware_mp1_revision",
+                    "firmware_version", "firmware_bytes",
                     "stage_prepared", "stage_mapped",
                     "stage_page_count", "stage_pte_verified",
                     "stage_bad_pte", "stage_mapping_error",
@@ -5358,6 +5439,8 @@ bool RedNaviProbe::start(IOService *provider) {
                     "fence_before", "fence_expected", "fence_observed",
                     "fence_polls", "fence_timeout_ms",
                     "fence_ok", "status", "fw_addr_lo", "fw_addr_hi",
+                    "submitted", "response_valid", "transport_error",
+                    "transport_quarantined",
                     "accepted", "smu_response_before",
                     "smu_response_after", "may_setup_tmr"
                 };
@@ -5373,6 +5456,9 @@ bool RedNaviProbe::start(IOService *provider) {
                         p73PmfwMetadataVerified),
                     static_cast<uint32_t>(
                         p73PmfwDigestTrusted),
+                    static_cast<uint32_t>(p73PmfwTargetVerified),
+                    static_cast<uint32_t>(p73PmfwTargetMatch),
+                    p73PmfwTargetRevision, p73HardwareMp1Revision,
                     p73PmfwVersion, p73PmfwBytes,
                     static_cast<uint32_t>(p73StagePrepared),
                     static_cast<uint32_t>(p73StageMapped),
@@ -5390,6 +5476,10 @@ bool RedNaviProbe::start(IOService *provider) {
                     rn_navi33::p7_pmfw::kFenceTimeoutMs,
                     static_cast<uint32_t>(p73FenceOk),
                     p73Status, p73FwAddrLo, p73FwAddrHi,
+                    static_cast<uint32_t>(p7SubmitWasIssued),
+                    static_cast<uint32_t>(p7SubmitResponseValid),
+                    p7SubmitTransportError,
+                    static_cast<uint32_t>(p7SubmitTransportQuarantined),
                     static_cast<uint32_t>(p73PmfwAccepted),
                     p73SmuRespBefore, p73SmuRespAfter,
                     0u
