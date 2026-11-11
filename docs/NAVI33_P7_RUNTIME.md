@@ -1375,3 +1375,92 @@ A firmware LOAD_IP_FW response only demonstrates the PSP
 has accepted the image. MEC stacks P0..P7, RLC, MES,
 graphics queue programming and Metal remain disabled.
 Do NOT retry a stalled PSP ring without reboot.
+
+
+## 0.0.33 — P7.14 RS64 MEC P0 Stack (thirteenth PSP fence)
+
+Real RX 7600 / RedNavi 0.0.32 on 2026-11-11:
+MEC instruction firmware `GFX_FW_TYPE_RS64_MEC=89`,
+267008 B, was accepted by PSP with fence 11→12,
+status=0, response_valid=1, accepted=1, no PSP transport
+error or quarantine, and Ring WPTR/RPTR 176→192.
+The separately opted-in 270336 B (66×4096) DMA staging,
+GART PTE mapping and previous eleven PSP firmware
+checkpoints all remained operational.
+
+Linux `drivers/gpu/drm/amd/amdgpu/amdgpu_ucode.c`
+selects the GFX v2.0 **Data** segment for
+`AMDGPU_UCODE_ID_CP_RS64_MEC_P0_STACK`. Linux
+`psp_gfx_if.h` defines
+`GFX_FW_TYPE_RS64_MEC_P0_STACK=94` (P1=95).
+The same immutable previously verified source
+`beagleboard/mirror-linux-firmware` at commit
+`2f411c10e4570d03426d3cb095471aa1120114ab`,
+`amdgpu/gc_11_0_2_mec.bin`, Git blob
+`48e4b8f68763f21196de71732f319805ec8483dd`
+contains code offset 256, code 267008 B and
+**Data offset 267264, Data 139264 B**.
+
+The existing ignored locally generated
+`RedNavi/navi33_gc_mec_fw.h` embeds
+`kRNNavi33GcMecDataFw` from this pinned binary.
+No new firmware fetch/generator or DMA remap is needed.
+Do not check proprietary firmware/generated headers into Git.
+
+Step 16 adds **one independent opt-in**:
+`rednavi_navi33_p714_mec_p0=1`.
+The pure admission gate requires MEC Code
+(`p713Accepted=1`) and every earlier SDMA/PFP/ME
+component accepted *in this boot*, predecessor PSP
+fence expected/observed=12, correct GC11.0.2 hardware IP
+and independently pinned MEC source, retained host DMA
+staging with verified 66-page expansion/PTE mapping,
+healthy non-quarantined PSP transport, and its own flag.
+Only the **data segment** is passed to
+`LOAD_IP_FW(type94)`.
+
+### Two fresh-boot test procedure
+
+Build `feature/navi33-p714-gc-mec-p0` with all existing
+generated firmware headers and explicit P7.4–P7.13 opts.
+Keep the verified 0.0.32 USB EFI available for recovery.
+
+**First boot: safe gate-only validation**
+Use `rednavi_navi33_p7_step=16`, keep
+`rednavi_navi33_p713_stage_expand=1` and
+`rednavi_navi33_p713_gc_mec=1`, but **omit**
+`rednavi_navi33_p714_mec_p0=1`.
+Expect:
+```text
+navi33-p7-gc-mec-p0-runtime:
+  step=16 gate_error=2 explicit_opt_in=0
+  mec_accepted=1 me_p1_accepted=1
+  stage_expansion_verified=1 stage_capacity=270336
+  prior_fence_expected=12 prior_fence_observed=12
+  firmware_version=2590 source_verified=1
+  firmware_bytes=139264 fw_type=94
+  submitted=0 accepted=0
+```
+The previously verified twelve PSP commands should still
+succeed in this boot, including MEC Code at fence12.
+
+**Second boot: opt in to one new PSP command**
+After verifying the first boot's complete current-boot
+predecessor chain, add
+`rednavi_navi33_p714_mec_p0=1`
+and boot again. Expected success:
+```text
+navi33-p7-gc-mec-p0-runtime:
+  gate_error=0 may_load=1 command_id=6 fw_type=94
+  firmware_bytes=139264
+  submitted=1 submit_wptr_before=192 submit_wptr_after=208
+  fence_before=12 fence_expected=13 fence_observed=13
+  response_valid=1 status=0 accepted=1
+  submit_rptr_final=208 transport_error=0
+  gc_mec_p0_loaded=1 gc_engine_started=0
+```
+
+Do not retry a timed-out or quarantined PSP Ring in the
+same boot. PSP acceptance does not imply MEC/GC execution.
+MEC P1..P7, RLC, MES, GPU graphics/compute queues,
+WindowServer and Metal acceleration remain disabled.
