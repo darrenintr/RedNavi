@@ -20,3 +20,6 @@ RedNavi/navi33_gc_pfp_fw.h
 
 # Pinned GC11.0.2 ME GFX2.0 binary-derived local firmware header.
 RedNavi/navi33_gc_me_fw.h
+
+# Pinned GC11.0.2 MEC GFX2.0 local firmware header (do not distribute).
+RedNavi/navi33_gc_mec_fw.h
