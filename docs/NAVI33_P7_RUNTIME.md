@@ -762,3 +762,89 @@ remains expected until GC firmware is also ready.
 
 In case of a timeout or driver hang, do **not** reissue a PSP
 command in the same session. Boot known-good 0.0.24 USB EFI.
+
+
+
+## 0.0.26 P7.7: GC11.0.2 RS64 PFP instruction microcode (sixth PSP fence)
+
+The real RX 7600 on 2026-11-11 verified P7.6:
+`sdma_firmware_both_loaded=1`, TH1 type=72,
+`fence_before=4`, `fence_expected=5`,
+`fence_observed=5`, `status=0`, `accepted=1`,
+`transport_error=0`, and both ring pointers 64→80. This
+checkpoint starts **GC11.0.2 firmware** with **only RS64 PFP
+instruction microcode**, not PFP data/stack, ME/MEC, RLC, IMU,
+MES, SDMA ring init or graphics acceleration.
+
+The Linux kernel `gfx_v11_0.c` enables RS64 for GC11.0.2 when
+`gfx_firmware_header_v2_0` is present. `amdgpu_psp.c` maps
+`AMDGPU_UCODE_ID_CP_RS64_PFP` to
+`GFX_FW_TYPE_RS64_PFP=87`. PSP `GFX_CMD_ID_LOAD_IP_FW=6`.
+The pinned source image `gc_11_0_2_pfp.bin` has:
+- full file 230,496 bytes
+- common header v2.0, GC IP11.0 (Navi33 exact rev2 pinned by hash)
+- RS64 PFP code offset 256, code length 90,976 bytes
+- RS64 PFP stack/data offset 91,232, size 139,264 bytes
+- only the code part is staged, within existing 262,144-byte DMA area.
+
+Firmware is not committed to the repository. Source is pinned to
+`beagleboard/mirror-linux-firmware` commit
+`2f411c10e4570d03426d3cb095471aa1120114ab`;
+reviewed binary Git blob SHA-1
+`4d18151728ccc513fbabddec25f58dcccc8eee2a`.
+The generator refuses files with the wrong name, hash, header,
+code/data offsets, IP, or stage limit.
+
+### Local build
+
+```sh
+cd ~/RedNavi
+git fetch origin
+git switch --track origin/feature/navi33-p77-gc-pfp
+mkdir -p ~/RedNavi-firmware
+curl -fL --retry 3 \
+  'https://raw.githubusercontent.com/beagleboard/mirror-linux-firmware/2f411c10e4570d03426d3cb095471aa1120114ab/amdgpu/gc_11_0_2_pfp.bin' \
+  -o ~/RedNavi-firmware/gc_11_0_2_pfp.bin
+python3 tools/gen_navi33_gc_pfp_fw_header.py \
+  ~/RedNavi-firmware/gc_11_0_2_pfp.bin RedNavi/navi33_gc_pfp_fw.h
+make clean
+make test && make navi33-p4
+```
+
+### Separate safety checkpoint
+
+First boot `rednavi_navi33_p7_step=9` with all **previous**
+opt-ins set (SETUP_TMR, SDMA TH0, SDMA TH1), but **omit**
+`rednavi_navi33_p77_gc_pfp=1`. Previously successful PSP
+commands still run; P7.7 is read-only and expected to publish
+`navi33-p7-gc-pfp-runtime.gate_error=2`, `submitted=0`,
+`sdma_both_accepted=1`, previous fence expected/observed 5.
+Keep a separate bootable 0.0.25 EFI and a backup of config.plist.
+
+Only after verifying Step 9 admission and the known-good EFI,
+explicitly opt-in with `rednavi_navi33_p77_gc_pfp=1` in a
+second fresh boot. The policy requires exact IP Discovery GC11.0.2,
+the pinned, locally generated PFP source, both SDMA threads
+accepted during this boot, previous PSP fence 5, retained/still
+mapped host-DMA firmware stage, and a healthy PSP ring.
+
+Expected outcome:
+```text
+navi33-p7-gc-pfp-runtime:
+  gate_error=0 may_load=1
+  sdma_both_accepted=1 source_verified=1
+  observed_gc_revision=2 firmware_gc_revision=2
+  command_id=6 fw_type=87 firmware_bytes=90976
+  prior_fence_expected=5 prior_fence_observed=5
+  submitted=1
+  submit_wptr_before=80 submit_wptr_after=96
+  fence_before=5 fence_expected=6 fence_observed=6
+  fence_ok=1 response_valid=1 status=0
+  accepted=1 gc_pfp_firmware_loaded=1 gc_engine_started=0
+```
+
+The new code does not set post-PSP `gcFirmwareLoaded`: one PFP
+instruction image is not complete GC firmware. Consequently,
+`post_gate_error=12` (IpFirmwareIncomplete) and
+`may_start_mes=0` are still expected. On PSP timeout or
+hang, no more PSP ring commands may be issued until reboot.

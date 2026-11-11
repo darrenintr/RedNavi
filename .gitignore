@@ -14,3 +14,6 @@ mesa-bridge/bridge_test
 
 # Local Navi33 SDMA binary-derived header; never distribute source firmware.
 RedNavi/navi33_sdma_fw.h
+
+# Exact pinned Navi33 GC11.0.2 PFP binary-derived local header.
+RedNavi/navi33_gc_pfp_fw.h
