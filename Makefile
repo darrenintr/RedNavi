@@ -253,6 +253,8 @@ test:
 	./build/navi33_p74_setup_tmr_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p75_sdma_test.cpp -o build/navi33_p75_sdma_test
 	./build/navi33_p75_sdma_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p76_sdma_th1_test.cpp -o build/navi33_p76_sdma_th1_test
+	./build/navi33_p76_sdma_th1_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p7_pmfw_test.cpp -o build/navi33_p7_pmfw_test
 	./build/navi33_p7_pmfw_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_linux_boot_parity_test.cpp -o build/navi33_linux_boot_parity_test

@@ -680,3 +680,85 @@ navi33-p7-sdma-runtime:
 PSP acceptance **does not prove** a running SDMA engine or graphics
 acceleration; next steps are SDMA Control Thread and then the
 GC11.0.2 firmware path. Keep a known-bootable 0.0.23 EFI.
+
+
+
+## 0.0.25 P7.6: Navi33 SDMA Control Thread (TH1), fifth PSP fence
+
+Real RX 7600 Step 7 checkpoint (0.0.24) succeeded 2026-11-11:
+`firmware_ip_revision=observed_ip_revision=2`,
+`source_verified=1`, `fw_type=71`,
+`firmware_bytes=17408`, `fence_before=3`,
+`fence_expected=fence_observed=4`, `status=0`, `accepted=1`,
+`transport_error=0`. GPCOM `WPTR` and final `RPTR`
+advanced `48 -> 64`. This establishes a strong checkpoint for
+issuing a *fifth* PSP command: SDMA6.0.2 **Control Thread** TH1.
+
+This branch contains **no new vendor firmware**; it uses the same
+locally generated, Git-blob-verified `navi33_sdma_fw.h`, where the
+already pinned `sdma_6_0_2.bin` has exactly 17,408 context
+bytes and 16,896 control bytes. Linux `psp_gfx_if.h` defines
+`GFX_FW_TYPE_SDMA_UCODE_TH1=72` and
+`GFX_CMD_ID_LOAD_IP_FW=6`. Only the TH1 payload is submitted
+in the fifth GPCOM frame. Both TH0 and TH1 PSP acceptance mean
+**firmware loaded**, not an initialized SDMA engine.
+
+### Build
+
+```sh
+cd ~/RedNavi
+git fetch origin
+git switch -c feature/navi33-p76-sdma-th1 --track origin/feature/navi33-p76-sdma-th1
+# Existing generated PSP, SMU and SDMA headers are required.
+test -f RedNavi/psp_fw.h &&
+test -f RedNavi/smu_fw.h &&
+test -f RedNavi/navi33_sdma_fw.h
+make clean
+make test && make navi33-p4
+```
+
+### Boot protocol
+
+Retain previous explicit opt-ins for P7.4 and P7.5:
+`rednavi_navi33_p74_setup_tmr=1` and
+`rednavi_navi33_p75_sdma_th0=1`.
+
+First, set `rednavi_navi33_p7_step=8`, but **do not enable**
+`rednavi_navi33_p76_sdma_th1=1`. The prior steps *still*
+execute as before (PMFW, TMR, SDMA TH0), but new
+`navi33-p7-sdma-th1-runtime` should show:
+```text
+step=8 gate_error=2 explicit_opt_in=0 submitted=0 accepted=0
+prior_fence_expected=4 prior_fence_observed=4 th0_accepted=1
+```
+
+On a second boot, only after confirming Step 8 first-round safety
+and keeping 0.0.24 fallback EFI, enable the separate
+`rednavi_navi33_p76_sdma_th1=1` arg. Expected fifth-command
+telemetry:
+```text
+navi33-p7-sdma-th1-runtime:
+  gate_error=0 may_load=1 th0_accepted=1
+  firmware_bytes=16896 fw_type=72 command_id=6
+  submitted=1
+  submit_wptr_before=64 submit_wptr_after=80
+  fence_before=4 fence_expected=5 fence_observed=5
+  response_valid=1 status=0 accepted=1
+  transport_error=0 transport_quarantined=0
+  sdma_firmware_both_loaded=1 sdma_engine_started=0
+```
+RPTR must be observed but a transient lag by itself is not a
+failure if fence/status completed successfully. The fifth
+submission reuses the existing retained PSP-mapped host-DMA
+firmware staging after TH0 fence=4, preserving GART mappings.
+The source stays validated against the same pinned Linux firmware
+blob, and every previous gate must succeed again in this boot.
+
+No VM/SDMA queues are created; no SDMA register programming or GC
+firmware loading occurs in Step 8. `may_start_mes` must remain 0.
+The `navi33-p7-postpsp-runtime` report gains
+`sdma_firmware_both_loaded`, while `post_gate_error=12`
+remains expected until GC firmware is also ready.
+
+In case of a timeout or driver hang, do **not** reissue a PSP
+command in the same session. Boot known-good 0.0.24 USB EFI.
