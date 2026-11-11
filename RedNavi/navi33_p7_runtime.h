@@ -13,11 +13,12 @@
 // step 5: PMFW-only LOAD_IP_FW checkpoint; SETUP_TMR remains blocked
 // step 6: optionally submit SETUP_TMR after a second explicit boot opt-in
 // step 7: optional SDMA6.0.2 Context Thread PSP firmware checkpoint
+// step 8: optional SDMA6.0.2 Control Thread TH1 PSP firmware checkpoint
 #include <stdint.h>
 
 namespace rn_navi33 { namespace p7_runtime {
 
-constexpr uint32_t kMaxExecutionStep = 7u;
+constexpr uint32_t kMaxExecutionStep = 8u;
 
 constexpr uint32_t sanitizeStep(uint32_t raw) {
     return raw <= kMaxExecutionStep ? raw : 0u;
