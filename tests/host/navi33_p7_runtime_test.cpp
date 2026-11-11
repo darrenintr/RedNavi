@@ -183,7 +183,7 @@ int main() {
         assert(r.error == Error::Ok);
         assert(r.mayStartQueues);
     }
-    for (uint32_t step : {18u, 19u}) {
+    for (uint32_t step = 18u; step <= 19u; ++step) {
         auto in = ready(step);
         in.secureOsAlive = true;
         const auto r = inspect(in);
