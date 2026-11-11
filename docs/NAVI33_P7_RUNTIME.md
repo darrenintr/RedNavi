@@ -1253,3 +1253,125 @@ acceleration remain disabled. PSP acceptance of ME P1 does
 NOT mean GC firmware has finished loading or ME is executing.
 `post_gate_error=12`, `may_start_mes=0` remain expected.
 Do not retry a stalled PSP ring in the same boot.
+
+
+## 0.0.32 — P7.13 RS64 MEC Code, explicit staging expansion and twelfth PSP fence
+
+RX 7600 / 0.0.31 P7.12 confirmed actual PSP acceptance of
+RS64 ME P1_STACK (type 93, 139264 B) at fence 10→11:
+status=0, response_valid=1, accepted=1, transport_error=0,
+ring WPTR/RPTR 160→176. This does NOT imply a running GC engine.
+
+Linux `amdgpu_ucode.c` defines a standalone GC11.0.2 RS64
+MEC code microcode and separate data stacks; `psp_gfx_if.h`
+assigns `GFX_FW_TYPE_RS64_MEC=89`. The verified upstream
+firmware `gc_11_0_2_mec.bin` at
+`beagleboard/mirror-linux-firmware` commit
+`2f411c10e4570d03426d3cb095471aa1120114ab`
+has reviewed full Git blob
+`48e4b8f68763f21196de71732f319805ec8483dd`.
+
+GFX firmware header v2.0, GC11.0:
+- whole file **406528 bytes**;
+- firmware version **2590**, feature version **29**;
+- **MEC Code** offset 256, **267008 bytes**;
+- MEC Data offset 267264, 139264 bytes (**not submitted**).
+
+**Important mapping change:** current `prepareNavi33PmfwDma`
+is called with PMFW size, yielding an actual retained stage of
+**262144 bytes (64 pages)**. MEC code needs **267008 bytes**,
+aligned to **270336 bytes (66 pages)**. No existing staging
+buffer must ever be overrun, and the active PSP GART must never
+be changed after the ring is created.
+
+A new pure policy in `navi33_p713_stage_expand.h` requires:
+Step15, explicit `rednavi_navi33_p713_stage_expand=1`,
+verified real GC11.0.2 identity, reviewed MEC hash/metadata,
+GART ownership and available GART span. If admitted, it passes
+a new stage target to `prepareNavi33PmfwDma` **before**
+the PSP ring and maps two additional DMA pages (PTE indices
+323 and 324, in addition to existing 259..322), verified and
+flushed once with the rest of the runtime PTEs.
+No PTE is updated after ring creation.
+`navi33-p7-gc-mec-stage-runtime` separately reports the plan,
+target capacity, actual retained page count and PTE status.
+Stage expansion **does not** grant permission to load MEC.
+
+`navi33_p713_gc_mec.h` requires all previous current-boot
+PSP/SOS/TMR/SDMA/PFP/ME accepted, ME P1 fence11/11,
+pinned MEC source metadata, stage expansion confirmed and
+verified PTEs, healthy transport, and a **different** bootarg
+`rednavi_navi33_p713_gc_mec=1` to submit one
+PSP `LOAD_IP_FW(type89, 267008 B)` with expected fence12.
+
+### Three-boot safety sequence
+
+Keep a known-good 0.0.31 USB EFI backup. Build from
+`feature/navi33-p713-gc-mec-stage`, with the existing
+generated PSP/SMU/SDMA/PFP/ME headers. Generate the MEC
+header locally (never check it into Git):
+
+```sh
+cd ~/RedNavi
+mkdir -p ~/RedNavi-firmware
+curl -fL --retry 3 \
+  "https://raw.githubusercontent.com/beagleboard/mirror-linux-firmware/2f411c10e4570d03426d3cb095471aa1120114ab/amdgpu/gc_11_0_2_mec.bin" \
+  -o ~/RedNavi-firmware/gc_11_0_2_mec.bin
+python3 tools/gen_navi33_gc_mec_fw_header.py \
+  ~/RedNavi-firmware/gc_11_0_2_mec.bin RedNavi/navi33_gc_mec_fw.h
+make clean
+make test && make navi33-p4
+```
+
+**Boot A (software-only MEC preflight):**
+Keep all P7.4–P7.12 previous opt-ins; set
+`rednavi_navi33_p7_step=15`. Omit **both** new MEC args.
+Expected:
+```text
+navi33-p7-gc-mec-stage-runtime:
+  explicit_opt_in=0 may_expand=0 actual_bytes=262144
+  mec_code_bytes=267008
+navi33-p7-gc-mec-runtime:
+  step=15 gate_error=2 explicit_opt_in=0
+  me_p1_accepted=1 prior_fence_expected=11
+  prior_fence_observed=11 firmware_bytes=267008 fw_type=89
+  submitted=0 accepted=0
+```
+Note this boot **cannot** load the 267008B MEC code; it is
+too large for the 262144B stage.
+
+**Boot B (expand GART/DMA stage ONLY):**
+Set `rednavi_navi33_p713_stage_expand=1` but do **not**
+set `rednavi_navi33_p713_gc_mec=1`. Confirm:
+```text
+navi33-p7-gc-mec-stage-runtime:
+  plan_error=0 may_expand=1 target_bytes=270336
+  actual_bytes=270336 actual_pages=66
+  stage_prepared=1 stage_mapped=1 stage_pte_verified=1
+navi33-p7-gc-mec-runtime:
+  gate_error=2 explicit_opt_in=0 stage_expansion_verified=1
+  me_p1_accepted=1 prior_fence_expected=11
+  prior_fence_observed=11 fw_type=89
+  submitted=0 accepted=0
+```
+The previous eleven PSP commands should remain accepted.
+
+**Boot C (one isolated MEC command):**
+Only after Boot B passes, set the extra
+`rednavi_navi33_p713_gc_mec=1`, keeping stage expand=1.
+Expected:
+```text
+navi33-p7-gc-mec-runtime:
+  gate_error=0 may_load=1
+  firmware_bytes=267008 command_id=6 fw_type=89
+  submitted=1 submit_wptr_before=176 submit_wptr_after=192
+  fence_before=11 fence_expected=12 fence_observed=12
+  response_valid=1 status=0 accepted=1
+  submit_rptr_final=192 transport_error=0
+  gc_mec_firmware_loaded=1 gc_engine_started=0
+```
+
+A firmware LOAD_IP_FW response only demonstrates the PSP
+has accepted the image. MEC stacks P0..P7, RLC, MES,
+graphics queue programming and Metal remain disabled.
+Do NOT retry a stalled PSP ring without reboot.
