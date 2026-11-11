@@ -68,11 +68,12 @@ def parse_image(data):
         data_bytes > len(data) - data_off or
         code_bytes + data_bytes > common_ucode_bytes):
         raise ValueError("GC PFP code/data segments overlap or exceed source")
-    if code_bytes > MAX_STAGING_BYTES:
-        raise ValueError("PFP instruction segment exceeds DMA staging budget")
+    if max(code_bytes, data_bytes) > MAX_STAGING_BYTES:
+        raise ValueError("PFP instruction/data segment exceeds DMA staging budget")
     return {
         "version": version,
         "code": data[code_off:code_off + code_bytes],
+        "data": data[data_off:data_off + data_bytes],
         "code_bytes": code_bytes,
         "data_bytes": data_bytes,
         "code_offset": code_off,
@@ -118,10 +119,19 @@ def generate(source, target):
                 f"0x{byte:02x}" for byte in data_to_emit[offset:offset+16]) +
                     ",\n")
         f.write("};\n")
+        # Both P0_STACK and P1_STACK use this same data payload,
+        # selected by distinct PSP fw_type IDs (90 and 91).
+        f.write("static const unsigned char kRNNavi33GcPfpDataFw[] = {\n")
+        data_bytes = parsed["data"]
+        for offset in range(0, len(data_bytes), 16):
+            f.write("    " + ", ".join(
+                f"0x{byte:02x}" for byte in data_bytes[offset:offset+16]) +
+                ",\n")
+        f.write("};\n")
     print(
         f"Navi33 GC11.0.2 RS64 PFP v{parsed['version']}; "
         f"code {parsed['code_bytes']} B; data {parsed['data_bytes']} B "
-        f"(NOT staged); Git blob {actual}; SHA-256 {digest}")
+        f"(optional PSP P0/P1 stacks); Git blob {actual}; SHA-256 {digest}")
 
 
 def main(argv=None):

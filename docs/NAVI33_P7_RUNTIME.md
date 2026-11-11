@@ -848,3 +848,84 @@ instruction image is not complete GC firmware. Consequently,
 `post_gate_error=12` (IpFirmwareIncomplete) and
 `may_start_mes=0` are still expected. On PSP timeout or
 hang, no more PSP ring commands may be issued until reboot.
+
+
+
+## 0.0.27 P7.8: RS64 PFP P0_STACK, isolated seventh PSP fence
+
+The 2026-11-11 RX 7600 Step 9 trace proved that the Navi33
+GC11.0.2 RS64 PFP instruction microcode (type=87, 90,976 B)
+was PSP-accepted at `fence=6/6`, `status=0`,
+`response_valid=1` with ring WPTR/RPTR 80→96.
+Both SDMA threads were still accepted and transport was healthy.
+
+Linux `amdgpu_ucode.c` maps both RS64 PFP P0_STACK and P1_STACK
+to the **same data slice** of `gc_11_0_2_pfp.bin`:
+`gfx_firmware_header_v2_0.data_offset_bytes=91232`,
+`data_size_bytes=139264` in the separately reviewed pinned image.
+However, `psp_gfx_if.h` defines distinct PSP firmware types:
+`GFX_FW_TYPE_RS64_PFP_P0_STACK=90` and
+`GFX_FW_TYPE_RS64_PFP_P1_STACK=91`.
+**Step 10 submits only P0_STACK (type=90); P1 is next.**
+
+The existing reviewed source remains pinned to Git blob
+`4d18151728ccc513fbabddec25f58dcccc8eee2a`
+from `beagleboard/mirror-linux-firmware` commit
+`2f411c10e4570d03426d3cb095471aa1120114ab`.
+The generator now emits both code and data arrays into the
+ignored, locally built `RedNavi/navi33_gc_pfp_fw.h`.
+Old generated headers *must be regenerated* after switching
+to this branch or the Step 10 code will not compile.
+
+### Build on macOS
+
+```sh
+cd ~/RedNavi
+git fetch origin
+git switch --track origin/feature/navi33-p78-gc-pfp-p0
+python3 tools/gen_navi33_gc_pfp_fw_header.py \
+  ~/RedNavi-firmware/gc_11_0_2_pfp.bin RedNavi/navi33_gc_pfp_fw.h
+make clean
+make test && make navi33-p4
+```
+
+Keep a verified 0.0.26 USB OpenCore EFI backup before installing 0.0.27.
+
+### Safe two-boot test
+
+First boot must retain all four prior PSP opt-ins:
+`rednavi_navi33_p74_setup_tmr=1`,
+`rednavi_navi33_p75_sdma_th0=1`,
+`rednavi_navi33_p76_sdma_th1=1`,
+`rednavi_navi33_p77_gc_pfp=1`.
+Set `rednavi_navi33_p7_step=10` but do NOT set the new
+`rednavi_navi33_p78_pfp_p0=1` argument yet. Expect:
+```text
+navi33-p7-gc-pfp-p0-runtime:
+  step=10 gate_error=2 explicit_opt_in=0 submitted=0 accepted=0
+  pfp_accepted=1 prior_fence_expected=6 prior_fence_observed=6
+  firmware_bytes=139264 fw_type=90
+```
+
+After real hardware read-only acceptance, start a second fresh boot
+with `rednavi_navi33_p78_pfp_p0=1`. The seventh PSP command is
+now admitted only if the current boot's RS64 PFP firmware load at
+fence 6 succeeded, the exact GC IP 11.0.2 and pinned source match,
+all prior SDMA/PMFW/TMR prerequisites succeeded, the unchanged
+host-DMA staging PTEs remain valid, and PSP transport is healthy.
+
+Expected fifth? No — this is the **seventh PSP GPCOM command**:
+```text
+navi33-p7-gc-pfp-p0-runtime:
+  gate_error=0 may_load=1
+  firmware_bytes=139264 command_id=6 fw_type=90
+  submitted=1
+  submit_wptr_before=96 submit_wptr_after=112
+  fence_before=6 fence_expected=7 fence_observed=7
+  status=0 response_valid=1 accepted=1
+  gc_pfp_p0_loaded=1 gc_engine_started=0
+```
+The PFP P0_STACK load does not start any graphics engines,
+complete GC firmware, or enable MES. In particular,
+`post_gate_error=12` and `may_start_mes=0` remain expected.
+Do not retry a stalled command without reboot.

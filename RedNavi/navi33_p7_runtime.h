@@ -15,11 +15,12 @@
 // step 7: optional SDMA6.0.2 Context Thread PSP firmware checkpoint
 // step 8: optional SDMA6.0.2 Control Thread TH1 PSP firmware checkpoint
 // step 9: optional GC11.0.2 RS64 PFP instruction-only PSP checkpoint
+// step 10: optional RS64 PFP P0_STACK data-only PSP checkpoint
 #include <stdint.h>
 
 namespace rn_navi33 { namespace p7_runtime {
 
-constexpr uint32_t kMaxExecutionStep = 9u;
+constexpr uint32_t kMaxExecutionStep = 10u;
 
 constexpr uint32_t sanitizeStep(uint32_t raw) {
     return raw <= kMaxExecutionStep ? raw : 0u;

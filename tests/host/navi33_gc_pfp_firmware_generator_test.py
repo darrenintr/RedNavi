@@ -41,6 +41,9 @@ class Navi33GcPfpTests(unittest.TestCase):
         self.assertEqual(x["data_bytes"], 139264)
         self.assertEqual(x["code"][0:1], b"\x23")
         self.assertEqual(x["code"][-1:], b"\x23")
+        self.assertEqual(len(x["data"]), 139264)
+        self.assertEqual(x["data"][:1], b"\x45")
+        self.assertEqual(x["data"][-1:], b"\x45")
         self.assertEqual(x["start_lo"], 12288)
 
     def test_reject_unpinned_source_even_matching_filename(self):
@@ -75,6 +78,7 @@ class Navi33GcPfpTests(unittest.TestCase):
                 self.assertIn("kRNNavi33GcPfpCodeBytes 90976u", output)
                 self.assertIn("kRNNavi33GcPfpDataBytes 139264u", output)
                 self.assertIn("static const unsigned char kRNNavi33GcPfpCodeFw[]", output)
+                self.assertIn("static const unsigned char kRNNavi33GcPfpDataFw[]", output)
         finally:
             GEN.REVIEWED_GIT_BLOB_SHA1 = saved
 
