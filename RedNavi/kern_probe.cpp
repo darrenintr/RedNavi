@@ -117,6 +117,8 @@
 #include "navi33_p713_gc_mec.h"
 #include "navi33_p714_gc_mec_p0.h"
 #include "navi33_p715_gc_mec_p1.h"
+#include "navi33_p716_gc_mec_p2.h"
+#include "navi33_p717_gc_mec_p3.h"
 #include "navi33_p713_stage_expand.h"
 #include "navi33_p7_pmfw.h"
 #include "navi33_p6_psp_boot_plan.h"
@@ -7798,6 +7800,420 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-p7-gc-mec-p1-runtime",
                           p715Names, p715Values,
                           sizeof(p715Values) / sizeof(p715Values[0]));
+                // P7.16: GC11.0.2 RS64 MEC P2_STACK data microcode.
+                // Linux uses the SAME 139264B pinned MEC GFX v2.0 data
+                // segment for P0 and P1. Different PSP types (94 vs 95).
+                // This fifteenth PSP LOAD_IP_FW(type96) requires prior
+                // P1 accepted at fence14. No engine/queue startup.
+                uint32_t p716OptInRaw = 0u;
+                const bool p716OptIn =
+                    PE_parse_boot_argn(
+                        "rednavi_navi33_p716_mec_p1",
+                        &p716OptInRaw, sizeof(p716OptInRaw)) &&
+                    p716OptInRaw == 1u;
+                rn_navi33::p716_gc_mec_p1::Input p716Input{};
+                p716Input.requested = p7StepArg >= 17u;
+                p716Input.explicitOptIn = p716OptIn;
+                p716Input.identityVerified = p715Input.identityVerified;
+                p716Input.observedGcMajor = p715Input.observedGcMajor;
+                p716Input.observedGcMinor = p715Input.observedGcMinor;
+                p716Input.observedGcRevision = p715Input.observedGcRevision;
+                p716Input.pspRingReady = p715Input.pspRingReady;
+                p716Input.tmrAccepted = p74Accepted;
+                p716Input.sdmaBothAccepted = p715Input.sdmaBothAccepted;
+                p716Input.pfpAccepted = p77Accepted;
+                p716Input.p0Accepted = p78Accepted;
+                p716Input.p1Accepted = p79Accepted;
+                p716Input.meAccepted = p710Accepted;
+                p716Input.meP0Accepted = p711Accepted;
+                p716Input.meP1Accepted = p712Accepted;
+                p716Input.mecAccepted = p713Accepted;
+                p716Input.mecP1Accepted = p715Accepted;
+                p716Input.stageExpansionVerified =
+                    p713StagePlan.mayExpand && p73StagePrepared &&
+                    p73StageMapped && p73StagePteVerified &&
+                    navi33PmfwStageBytes == p713StagePlan.targetStageBytes;
+                p716Input.previousFenceExpected = p715FenceExpected;
+                p716Input.previousFenceObserved = p715FenceObserved;
+                p716Input.transportHealthy =
+                    p715FenceOk && p715ResponseValid &&
+                    p715TransportError == 0u &&
+                    !p715Quarantined && !p7SubmitTransportQuarantined;
+                p716Input.stageOwnerRetained = p715Input.stageOwnerRetained;
+                p716Input.stageMapped = p715Input.stageMapped;
+                p716Input.stagePteVerified = p715Input.stagePteVerified;
+                p716Input.stageBytes = p715Input.stageBytes;
+                p716Input.stageGpuVa = p715Input.stageGpuVa;
+                p716Input.gartStart = p715Input.gartStart;
+                p716Input.gartEnd = p715Input.gartEnd;
+                // Same independently reviewed and pinned version 2590
+                // MEC Data source as P7.14; P1 requires a distinct PSP
+                // firmware type 96 and cannot inherit P0 acceptance.
+                p716Input.firmwarePresent = p715Input.firmwarePresent;
+                p716Input.firmwareMetadataVerified =
+                    p715Input.firmwareMetadataVerified;
+                p716Input.firmwareSourceVerified =
+                    p715Input.firmwareSourceVerified;
+                p716Input.firmwareIpMajor = p715Input.firmwareIpMajor;
+                p716Input.firmwareIpMinor = p715Input.firmwareIpMinor;
+                p716Input.firmwareIpRevision = p715Input.firmwareIpRevision;
+                uint32_t p716FwVersion = p715FwVersion;
+#if defined(RN_HAVE_NAVI33_GC_MEC_FW) && \
+    defined(RN_NAVI33_GC_MEC_FW_METADATA_V1)
+                p716Input.firmwareBytes = kRNNavi33GcMecDataBytes;
+#endif
+                const auto p716Gate =
+                    rn_navi33::p716_gc_mec_p1::inspect(p716Input);
+
+                bool p716FenceOk = false;
+                bool p716Submitted = false;
+                bool p716ResponseValid = false;
+                bool p716Accepted = false;
+                uint32_t p716Status = 0xffffffffu;
+                uint32_t p716FwAddrLo = 0u, p716FwAddrHi = 0u;
+                uint32_t p716TransportError = 0u;
+                bool p716Quarantined = p7SubmitTransportQuarantined;
+                uint32_t p716WptrBefore = 0u, p716WptrAfter = 0u;
+                uint32_t p716RptrBefore = 0u, p716RptrAfterKick = 0u;
+                uint32_t p716RptrFinal = 0u;
+                uint32_t p716FenceBefore = 0u, p716FenceExpected = 0u;
+                uint32_t p716FenceObserved = 0u, p716FencePolls = 0u;
+
+#ifdef RN_HAVE_NAVI33_GC_MEC_FW
+                if (p716Gate.mayLoad &&
+                    pspFence == rn_navi33::p716_gc_mec_p1::kPriorFence &&
+                    !p7SubmitTransportQuarantined &&
+                    navi33PmfwBuf && navi33PmfwBuf->getBytesNoCopy() &&
+                    sizeof(kRNNavi33GcMecDataFw) ==
+                        static_cast<size_t>(kRNNavi33GcMecDataBytes)) {
+                    // PSP accepted MEC P1 Stack(type95) at fence14.
+                    // Reuse the retained 66-page DMA stage and copy
+                    // only the same verified MEC GFX2.0 Data segment
+                    // (139264B) for P2_STACK(type96). No engines.
+                    uint8_t *const stage = static_cast<uint8_t *>(
+                        navi33PmfwBuf->getBytesNoCopy());
+                    memset(stage, 0, navi33PmfwStageBytes);
+                    memcpy(stage, kRNNavi33GcMecDataFw,
+                           kRNNavi33GcMecDataBytes);
+                    __sync_synchronize();
+
+                    uint32_t resp[4] = {
+                        0xffffffffu, 0xffffffffu,
+                        0xffffffffu, 0xffffffffu
+                    };
+                    p716FenceOk = pspSubmitP7(
+                        p71RingGpuVa, p71CmdGpuVa, p71FenceGpuVa,
+                        rn_navi33::p716_gc_mec_p1::kCommandId,
+                        p716Gate.words,
+                        rn_navi33::p716_gc_mec_p1::kArgumentCount,
+                        resp, 4u);
+                    p716Submitted = p7SubmitWasIssued;
+                    p716ResponseValid = p7SubmitResponseValid;
+                    p716TransportError = p7SubmitTransportError;
+                    p716Quarantined = p7SubmitTransportQuarantined;
+                    p716WptrBefore = p7SubmitWptrBefore;
+                    p716WptrAfter = p7SubmitWptrAfter;
+                    p716RptrBefore = p7SubmitRptrBefore;
+                    p716RptrAfterKick = p7SubmitRptrAfterKick;
+                    p716RptrFinal = p7SubmitRptrFinal;
+                    p716FenceBefore = p7SubmitFenceBefore;
+                    p716FenceExpected = p7SubmitFenceExpected;
+                    p716FenceObserved = p7SubmitFenceObserved;
+                    p716FencePolls = p7SubmitPolls;
+                    if (p716ResponseValid) {
+                        p716Status = resp[0];
+                        p716FwAddrLo = resp[2];
+                        p716FwAddrHi = resp[3];
+                    }
+                    p716Accepted = p716FenceOk && p716ResponseValid &&
+                        p716Status == 0u &&
+                        p716FenceExpected ==
+                            rn_navi33::p716_gc_mec_p1::kExpectedFence &&
+                        p716FenceObserved ==
+                            rn_navi33::p716_gc_mec_p1::kExpectedFence;
+                } else if (p716Gate.mayLoad) {
+                    p716TransportError = 10u;
+                }
+#endif
+
+                const char *const p716Names[] = {
+                    "step", "gate_error", "requested", "explicit_opt_in",
+                    "may_load", "firmware_present", "metadata_verified",
+                    "source_verified", "observed_gc_revision",
+                    "firmware_gc_revision", "firmware_version",
+                    "firmware_bytes", "stage_capacity", "stage_mapped",
+                    "stage_pte_verified", "stage_va_lo", "stage_va_hi",
+                    "command_id", "fw_type", "prior_fence_expected",
+                    "prior_fence_observed", "pfp_accepted",
+                    "p0_accepted", "p1_accepted", "me_accepted",
+                    "me_p0_accepted", "me_p1_accepted", "mec_accepted",
+                    "mec_p1_accepted", "stage_expansion_verified",
+                    "stage_expand_opt_in",
+                    "stage_plan_error", "sdma_both_accepted", "submitted",
+                    "submit_wptr_before", "submit_wptr_after",
+                    "submit_rptr_before", "submit_rptr_after_kick",
+                    "submit_rptr_final", "fence_before", "fence_expected",
+                    "fence_observed", "fence_polls", "fence_ok",
+                    "response_valid", "status", "fw_addr_lo", "fw_addr_hi",
+                    "transport_error", "transport_quarantined",
+                    "accepted", "gc_mec_p2_loaded",
+                    "gc_engine_started"
+                };
+                const uint32_t p716Values[] = {
+                    p7StepArg, static_cast<uint32_t>(p716Gate.error),
+                    static_cast<uint32_t>(p716Input.requested),
+                    static_cast<uint32_t>(p716OptIn),
+                    static_cast<uint32_t>(p716Gate.mayLoad),
+                    static_cast<uint32_t>(p716Input.firmwarePresent),
+                    static_cast<uint32_t>(p716Input.firmwareMetadataVerified),
+                    static_cast<uint32_t>(p716Input.firmwareSourceVerified),
+                    p716Input.observedGcRevision,
+                    p716Input.firmwareIpRevision, p716FwVersion,
+                    static_cast<uint32_t>(p716Input.firmwareBytes),
+                    static_cast<uint32_t>(p716Input.stageBytes),
+                    static_cast<uint32_t>(p716Input.stageMapped),
+                    static_cast<uint32_t>(p716Input.stagePteVerified),
+                    static_cast<uint32_t>(p716Input.stageGpuVa),
+                    static_cast<uint32_t>(p716Input.stageGpuVa >> 32),
+                    rn_navi33::p716_gc_mec_p1::kCommandId,
+                    rn_navi33::p716_gc_mec_p1::kFirmwareType,
+                    p716Input.previousFenceExpected,
+                    p716Input.previousFenceObserved,
+                    static_cast<uint32_t>(p77Accepted),
+                    static_cast<uint32_t>(p78Accepted),
+                    static_cast<uint32_t>(p79Accepted),
+                    static_cast<uint32_t>(p710Accepted),
+                    static_cast<uint32_t>(p711Accepted),
+                    static_cast<uint32_t>(p712Accepted),
+                    static_cast<uint32_t>(p713Accepted),
+                    static_cast<uint32_t>(p715Accepted),
+                    static_cast<uint32_t>(p716Input.stageExpansionVerified),
+                    static_cast<uint32_t>(p713StageOptIn),
+                    static_cast<uint32_t>(p713StagePlan.error),
+                    static_cast<uint32_t>(p716Input.sdmaBothAccepted),
+                    static_cast<uint32_t>(p716Submitted),
+                    p716WptrBefore, p716WptrAfter,
+                    p716RptrBefore, p716RptrAfterKick, p716RptrFinal,
+                    p716FenceBefore, p716FenceExpected,
+                    p716FenceObserved, p716FencePolls,
+                    static_cast<uint32_t>(p716FenceOk),
+                    static_cast<uint32_t>(p716ResponseValid),
+                    p716Status, p716FwAddrLo, p716FwAddrHi,
+                    p716TransportError, static_cast<uint32_t>(p716Quarantined),
+                    static_cast<uint32_t>(p716Accepted),
+                    static_cast<uint32_t>(p716Accepted),
+                    0u
+                };
+                rnPublish(this, "navi33-p7-gc-mec-p1-runtime",
+                          p716Names, p716Values,
+                          sizeof(p716Values) / sizeof(p716Values[0]));
+                // P7.17: GC11.0.2 RS64 MEC P3_STACK data microcode.
+                // Linux uses the SAME 139264B pinned MEC GFX v2.0 data
+                // segment for P0 and P1. Different PSP types (94 vs 95).
+                // This sixteenth PSP LOAD_IP_FW(type97) requires prior
+                // P2 accepted at fence15. No engine/queue startup.
+                uint32_t p717OptInRaw = 0u;
+                const bool p717OptIn =
+                    PE_parse_boot_argn(
+                        "rednavi_navi33_p717_mec_p1",
+                        &p717OptInRaw, sizeof(p717OptInRaw)) &&
+                    p717OptInRaw == 1u;
+                rn_navi33::p717_gc_mec_p1::Input p717Input{};
+                p717Input.requested = p7StepArg >= 17u;
+                p717Input.explicitOptIn = p717OptIn;
+                p717Input.identityVerified = p716Input.identityVerified;
+                p717Input.observedGcMajor = p716Input.observedGcMajor;
+                p717Input.observedGcMinor = p716Input.observedGcMinor;
+                p717Input.observedGcRevision = p716Input.observedGcRevision;
+                p717Input.pspRingReady = p716Input.pspRingReady;
+                p717Input.tmrAccepted = p74Accepted;
+                p717Input.sdmaBothAccepted = p716Input.sdmaBothAccepted;
+                p717Input.pfpAccepted = p77Accepted;
+                p717Input.p0Accepted = p78Accepted;
+                p717Input.p1Accepted = p79Accepted;
+                p717Input.meAccepted = p710Accepted;
+                p717Input.meP0Accepted = p711Accepted;
+                p717Input.meP1Accepted = p712Accepted;
+                p717Input.mecAccepted = p713Accepted;
+                p717Input.mecP2Accepted = p716Accepted;
+                p717Input.stageExpansionVerified =
+                    p713StagePlan.mayExpand && p73StagePrepared &&
+                    p73StageMapped && p73StagePteVerified &&
+                    navi33PmfwStageBytes == p713StagePlan.targetStageBytes;
+                p717Input.previousFenceExpected = p716FenceExpected;
+                p717Input.previousFenceObserved = p716FenceObserved;
+                p717Input.transportHealthy =
+                    p716FenceOk && p716ResponseValid &&
+                    p716TransportError == 0u &&
+                    !p716Quarantined && !p7SubmitTransportQuarantined;
+                p717Input.stageOwnerRetained = p716Input.stageOwnerRetained;
+                p717Input.stageMapped = p716Input.stageMapped;
+                p717Input.stagePteVerified = p716Input.stagePteVerified;
+                p717Input.stageBytes = p716Input.stageBytes;
+                p717Input.stageGpuVa = p716Input.stageGpuVa;
+                p717Input.gartStart = p716Input.gartStart;
+                p717Input.gartEnd = p716Input.gartEnd;
+                // Same independently reviewed and pinned version 2590
+                // MEC Data source as P7.14; P1 requires a distinct PSP
+                // firmware type 97 and cannot inherit P0 acceptance.
+                p717Input.firmwarePresent = p716Input.firmwarePresent;
+                p717Input.firmwareMetadataVerified =
+                    p716Input.firmwareMetadataVerified;
+                p717Input.firmwareSourceVerified =
+                    p716Input.firmwareSourceVerified;
+                p717Input.firmwareIpMajor = p716Input.firmwareIpMajor;
+                p717Input.firmwareIpMinor = p716Input.firmwareIpMinor;
+                p717Input.firmwareIpRevision = p716Input.firmwareIpRevision;
+                uint32_t p717FwVersion = p716FwVersion;
+#if defined(RN_HAVE_NAVI33_GC_MEC_FW) && \
+    defined(RN_NAVI33_GC_MEC_FW_METADATA_V1)
+                p717Input.firmwareBytes = kRNNavi33GcMecDataBytes;
+#endif
+                const auto p717Gate =
+                    rn_navi33::p717_gc_mec_p1::inspect(p717Input);
+
+                bool p717FenceOk = false;
+                bool p717Submitted = false;
+                bool p717ResponseValid = false;
+                bool p717Accepted = false;
+                uint32_t p717Status = 0xffffffffu;
+                uint32_t p717FwAddrLo = 0u, p717FwAddrHi = 0u;
+                uint32_t p717TransportError = 0u;
+                bool p717Quarantined = p7SubmitTransportQuarantined;
+                uint32_t p717WptrBefore = 0u, p717WptrAfter = 0u;
+                uint32_t p717RptrBefore = 0u, p717RptrAfterKick = 0u;
+                uint32_t p717RptrFinal = 0u;
+                uint32_t p717FenceBefore = 0u, p717FenceExpected = 0u;
+                uint32_t p717FenceObserved = 0u, p717FencePolls = 0u;
+
+#ifdef RN_HAVE_NAVI33_GC_MEC_FW
+                if (p717Gate.mayLoad &&
+                    pspFence == rn_navi33::p717_gc_mec_p1::kPriorFence &&
+                    !p7SubmitTransportQuarantined &&
+                    navi33PmfwBuf && navi33PmfwBuf->getBytesNoCopy() &&
+                    sizeof(kRNNavi33GcMecDataFw) ==
+                        static_cast<size_t>(kRNNavi33GcMecDataBytes)) {
+                    // PSP accepted MEC P2 Stack(type96) at fence15.
+                    // Reuse the retained 66-page DMA stage and copy
+                    // only the same verified MEC GFX2.0 Data segment
+                    // (139264B) for P3_STACK(type97). No engines.
+                    uint8_t *const stage = static_cast<uint8_t *>(
+                        navi33PmfwBuf->getBytesNoCopy());
+                    memset(stage, 0, navi33PmfwStageBytes);
+                    memcpy(stage, kRNNavi33GcMecDataFw,
+                           kRNNavi33GcMecDataBytes);
+                    __sync_synchronize();
+
+                    uint32_t resp[4] = {
+                        0xffffffffu, 0xffffffffu,
+                        0xffffffffu, 0xffffffffu
+                    };
+                    p717FenceOk = pspSubmitP7(
+                        p71RingGpuVa, p71CmdGpuVa, p71FenceGpuVa,
+                        rn_navi33::p717_gc_mec_p1::kCommandId,
+                        p717Gate.words,
+                        rn_navi33::p717_gc_mec_p1::kArgumentCount,
+                        resp, 4u);
+                    p717Submitted = p7SubmitWasIssued;
+                    p717ResponseValid = p7SubmitResponseValid;
+                    p717TransportError = p7SubmitTransportError;
+                    p717Quarantined = p7SubmitTransportQuarantined;
+                    p717WptrBefore = p7SubmitWptrBefore;
+                    p717WptrAfter = p7SubmitWptrAfter;
+                    p717RptrBefore = p7SubmitRptrBefore;
+                    p717RptrAfterKick = p7SubmitRptrAfterKick;
+                    p717RptrFinal = p7SubmitRptrFinal;
+                    p717FenceBefore = p7SubmitFenceBefore;
+                    p717FenceExpected = p7SubmitFenceExpected;
+                    p717FenceObserved = p7SubmitFenceObserved;
+                    p717FencePolls = p7SubmitPolls;
+                    if (p717ResponseValid) {
+                        p717Status = resp[0];
+                        p717FwAddrLo = resp[2];
+                        p717FwAddrHi = resp[3];
+                    }
+                    p717Accepted = p717FenceOk && p717ResponseValid &&
+                        p717Status == 0u &&
+                        p717FenceExpected ==
+                            rn_navi33::p717_gc_mec_p1::kExpectedFence &&
+                        p717FenceObserved ==
+                            rn_navi33::p717_gc_mec_p1::kExpectedFence;
+                } else if (p717Gate.mayLoad) {
+                    p717TransportError = 10u;
+                }
+#endif
+
+                const char *const p717Names[] = {
+                    "step", "gate_error", "requested", "explicit_opt_in",
+                    "may_load", "firmware_present", "metadata_verified",
+                    "source_verified", "observed_gc_revision",
+                    "firmware_gc_revision", "firmware_version",
+                    "firmware_bytes", "stage_capacity", "stage_mapped",
+                    "stage_pte_verified", "stage_va_lo", "stage_va_hi",
+                    "command_id", "fw_type", "prior_fence_expected",
+                    "prior_fence_observed", "pfp_accepted",
+                    "p0_accepted", "p1_accepted", "me_accepted",
+                    "me_p0_accepted", "me_p1_accepted", "mec_accepted",
+                    "mec_p2_accepted", "stage_expansion_verified",
+                    "stage_expand_opt_in",
+                    "stage_plan_error", "sdma_both_accepted", "submitted",
+                    "submit_wptr_before", "submit_wptr_after",
+                    "submit_rptr_before", "submit_rptr_after_kick",
+                    "submit_rptr_final", "fence_before", "fence_expected",
+                    "fence_observed", "fence_polls", "fence_ok",
+                    "response_valid", "status", "fw_addr_lo", "fw_addr_hi",
+                    "transport_error", "transport_quarantined",
+                    "accepted", "gc_mec_p3_loaded",
+                    "gc_engine_started"
+                };
+                const uint32_t p717Values[] = {
+                    p7StepArg, static_cast<uint32_t>(p717Gate.error),
+                    static_cast<uint32_t>(p717Input.requested),
+                    static_cast<uint32_t>(p717OptIn),
+                    static_cast<uint32_t>(p717Gate.mayLoad),
+                    static_cast<uint32_t>(p717Input.firmwarePresent),
+                    static_cast<uint32_t>(p717Input.firmwareMetadataVerified),
+                    static_cast<uint32_t>(p717Input.firmwareSourceVerified),
+                    p717Input.observedGcRevision,
+                    p717Input.firmwareIpRevision, p717FwVersion,
+                    static_cast<uint32_t>(p717Input.firmwareBytes),
+                    static_cast<uint32_t>(p717Input.stageBytes),
+                    static_cast<uint32_t>(p717Input.stageMapped),
+                    static_cast<uint32_t>(p717Input.stagePteVerified),
+                    static_cast<uint32_t>(p717Input.stageGpuVa),
+                    static_cast<uint32_t>(p717Input.stageGpuVa >> 32),
+                    rn_navi33::p717_gc_mec_p1::kCommandId,
+                    rn_navi33::p717_gc_mec_p1::kFirmwareType,
+                    p717Input.previousFenceExpected,
+                    p717Input.previousFenceObserved,
+                    static_cast<uint32_t>(p77Accepted),
+                    static_cast<uint32_t>(p78Accepted),
+                    static_cast<uint32_t>(p79Accepted),
+                    static_cast<uint32_t>(p710Accepted),
+                    static_cast<uint32_t>(p711Accepted),
+                    static_cast<uint32_t>(p712Accepted),
+                    static_cast<uint32_t>(p713Accepted),
+                    static_cast<uint32_t>(p716Accepted),
+                    static_cast<uint32_t>(p717Input.stageExpansionVerified),
+                    static_cast<uint32_t>(p713StageOptIn),
+                    static_cast<uint32_t>(p713StagePlan.error),
+                    static_cast<uint32_t>(p717Input.sdmaBothAccepted),
+                    static_cast<uint32_t>(p717Submitted),
+                    p717WptrBefore, p717WptrAfter,
+                    p717RptrBefore, p717RptrAfterKick, p717RptrFinal,
+                    p717FenceBefore, p717FenceExpected,
+                    p717FenceObserved, p717FencePolls,
+                    static_cast<uint32_t>(p717FenceOk),
+                    static_cast<uint32_t>(p717ResponseValid),
+                    p717Status, p717FwAddrLo, p717FwAddrHi,
+                    p717TransportError, static_cast<uint32_t>(p717Quarantined),
+                    static_cast<uint32_t>(p717Accepted),
+                    static_cast<uint32_t>(p717Accepted),
+                    0u
+                };
+                rnPublish(this, "navi33-p7-gc-mec-p1-runtime",
+                          p717Names, p717Values,
+                          sizeof(p717Values) / sizeof(p717Values[0]));
                 // Dedicated preflight telemetry makes it possible to
                 // prove mapping expansion separately from PSP command.
                 const char *const p713StageNames[] = {
