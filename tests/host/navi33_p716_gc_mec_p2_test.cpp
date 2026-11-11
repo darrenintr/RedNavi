@@ -53,7 +53,7 @@ static void rejects(Input in, Error reason) {
 int main() {
     static_assert(kCommandId == 6u, "Linux LOAD_IP_FW=6");
     static_assert(kFirmwareType == 96u, "RS64 MEC P2_STACK=96");
-    static_assert(kPriorFence == 15u && kExpectedFence == 15u,
+    static_assert(kPriorFence == 14u && kExpectedFence == 15u,
                   "P716 must execute as fifteenth ring command");
     {
         auto r = inspect(ready());
