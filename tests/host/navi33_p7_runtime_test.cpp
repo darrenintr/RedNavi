@@ -35,7 +35,8 @@ int main() {
         assert(sanitizeStep(14) == 14u);
         assert(sanitizeStep(15) == 15u);
         assert(sanitizeStep(16) == 16u);
-        assert(sanitizeStep(17) == 0u);
+        assert(sanitizeStep(17) == 17u);
+        assert(sanitizeStep(18) == 0u);
     }
     {
         auto r = inspect(Input{});
@@ -168,6 +169,13 @@ int main() {
     }
     {
         auto in = ready(16);
+        in.secureOsAlive = true;
+        auto r = inspect(in);
+        assert(r.error == Error::Ok);
+        assert(r.mayStartQueues);
+    }
+    {
+        auto in = ready(17);
         in.secureOsAlive = true;
         auto r = inspect(in);
         assert(r.error == Error::Ok);

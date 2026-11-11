@@ -1464,3 +1464,81 @@ Do not retry a timed-out or quarantined PSP Ring in the
 same boot. PSP acceptance does not imply MEC/GC execution.
 MEC P1..P7, RLC, MES, GPU graphics/compute queues,
 WindowServer and Metal acceleration remain disabled.
+
+
+## 0.0.34 — P7.15 RS64 MEC P1 Stack (fourteenth PSP fence)
+
+Real RX 7600 hardware / RedNavi 0.0.33 P7.14 (2026-11-11)
+verified RS64 MEC P0_STACK firmware accepted by PSP:
+GFX_FW_TYPE_RS64_MEC_P0_STACK=94, 139264 B,
+fence 12→13/13, status=0, response_valid=1,
+accepted=1, transport_error=0, transport_quarantined=0,
+Ring WPTR/RPTR 192→208. The 270336-byte 66-page DMA
+staging expansion and GART PTEs remained verified.
+PSP acceptance is NOT proof of graphics/compute execution.
+
+The Linux `drivers/gpu/drm/amd/amdgpu/amdgpu_ucode.c`
+uses the same GFX v2.0 MEC **Data** segment for
+`AMDGPU_UCODE_ID_CP_RS64_MEC_P0_STACK` and
+`AMDGPU_UCODE_ID_CP_RS64_MEC_P1_STACK`.
+`psp_gfx_if.h` defines **Type94 / Type95**.
+Only the **P1 Stack** is issued in this checkpoint.
+
+The source is the already independently pinned
+`gc_11_0_2_mec.bin` from
+`beagleboard/mirror-linux-firmware` at commit
+`2f411c10e4570d03426d3cb095471aa1120114ab`,
+Git blob SHA1
+`48e4b8f68763f21196de71732f319805ec8483dd`.
+The locally generated, Git-ignored
+`RedNavi/navi33_gc_mec_fw.h` includes its 139264 B Data
+array `kRNNavi33GcMecDataFw`; no new download, vendor
+binary check-in or DMA remapping is required.
+
+### Independent two-boot safety protocol
+
+New policy `navi33_p715_gc_mec_p1.h` requires P0 Stack
+accepted at current-boot PSP fence 13, all earlier
+TMR/SDMA/PFP/ME/MEC predecessors accepted, unchanged
+verified GC11.0.2 target, pinned source metadata,
+healthy non-quarantined PSP ring, and retained 66-page DMA
+backing/PTE mapping. New boot opt-in:
+`rednavi_navi33_p715_mec_p1=1`.
+
+**First boot, safe admission-only:** build
+`feature/navi33-p715-gc-mec-p1` / Kext 0.0.34;
+keep all preceding opt-ins (including
+`rednavi_navi33_p713_stage_expand=1`,
+`rednavi_navi33_p713_gc_mec=1`,
+`rednavi_navi33_p714_mec_p0=1`), set
+`rednavi_navi33_p7_step=17` and **do not set**
+`rednavi_navi33_p715_mec_p1=1`.
+Expect:
+```text
+navi33-p7-gc-mec-p1-runtime:
+  step=17 gate_error=2 explicit_opt_in=0
+  mec_accepted=1 mec_p0_accepted=1
+  stage_expansion_verified=1 stage_capacity=270336
+  prior_fence_expected=13 prior_fence_observed=13
+  firmware_version=2590 source_verified=1
+  firmware_bytes=139264 fw_type=95
+  submitted=0 accepted=0
+```
+
+**Second fresh boot only after verifying first:**
+add the independent `rednavi_navi33_p715_mec_p1=1`.
+Expect:
+```text
+navi33-p7-gc-mec-p1-runtime:
+  gate_error=0 may_load=1
+  command_id=6 fw_type=95 firmware_bytes=139264
+  submitted=1 submit_wptr_before=208 submit_wptr_after=224
+  fence_before=13 fence_expected=14 fence_observed=14
+  response_valid=1 status=0 accepted=1
+  submit_rptr_final=224 transport_error=0
+  gc_mec_p1_loaded=1 gc_engine_started=0
+```
+
+Keep an independently bootable, known-good 0.0.33 USB EFI
+for rollback. Do not resubmit when ring is timed-out.
+MEC P2-P7 stacks, RLC, MES, queues and Metal remain off.
