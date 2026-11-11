@@ -120,6 +120,8 @@
 #include "navi33_p716_gc_mec_p2.h"
 #include "navi33_p717_gc_mec_p3.h"
 #include "navi33_p718_rlc_g.h"
+#include "navi33_p719_imu_i.h"
+#include "navi33_p720_imu_d.h"
 #include "navi33_p713_stage_expand.h"
 #include "navi33_p7_pmfw.h"
 #include "navi33_p6_psp_boot_plan.h"
@@ -154,6 +156,9 @@
 #endif
 #ifdef RN_HAVE_NAVI33_GC_RLC_FW
 #include "navi33_gc_rlc_fw.h"
+#endif
+#ifdef RN_HAVE_NAVI33_GC_IMU_FW
+#include "navi33_gc_imu_fw.h"
 #endif
 #ifdef RN_HAVE_GC_FW
 #include "gc_fw.h"
@@ -8422,6 +8427,416 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-p7-gc-rlc-g-runtime",
                           p718Names, p718Values,
                           sizeof(p718Values) / sizeof(p718Values[0]));
+                // P7.19: IMU_I PSP LOAD_IP_FW type 68
+                // after RLC_G fence 17. No IMU execution.
+                uint32_t p719OptInRaw = 0u;
+                const bool p719OptIn =
+                    PE_parse_boot_argn(
+                        "rednavi_navi33_p719_imu_i",
+                        &p719OptInRaw, sizeof(p719OptInRaw)) &&
+                    p719OptInRaw == 1u;
+                rn_navi33::p719_imu_i::Input p719Input{};
+                p719Input.requested = p7StepArg >= 21u;
+                p719Input.explicitOptIn = p719OptIn;
+                p719Input.identityVerified = p718Input.identityVerified;
+                p719Input.observedGcMajor = p718Input.observedGcMajor;
+                p719Input.observedGcMinor = p718Input.observedGcMinor;
+                p719Input.observedGcRevision = p718Input.observedGcRevision;
+                p719Input.pspRingReady = p718Input.pspRingReady;
+                p719Input.tmrAccepted = p74Accepted;
+                p719Input.sdmaBothAccepted = p718Input.sdmaBothAccepted;
+                p719Input.pfpAccepted = p77Accepted;
+                p719Input.p0Accepted = p78Accepted;
+                p719Input.p1Accepted = p79Accepted;
+                p719Input.meAccepted = p710Accepted;
+                p719Input.meP0Accepted = p711Accepted;
+                p719Input.meP1Accepted = p712Accepted;
+                p719Input.mecAccepted = p713Accepted;
+                p719Input.rlcGAccepted = p718Accepted;
+                p719Input.stageExpansionVerified =
+                    p713StagePlan.mayExpand && p73StagePrepared &&
+                    p73StageMapped && p73StagePteVerified &&
+                    navi33PmfwStageBytes == p713StagePlan.targetStageBytes;
+                p719Input.previousFenceExpected = p718FenceExpected;
+                p719Input.previousFenceObserved = p718FenceObserved;
+                p719Input.transportHealthy =
+                    p718FenceOk && p718ResponseValid &&
+                    p718TransportError == 0u &&
+                    !p718Quarantined && !p7SubmitTransportQuarantined;
+                p719Input.stageOwnerRetained = p718Input.stageOwnerRetained;
+                p719Input.stageMapped = p718Input.stageMapped;
+                p719Input.stagePteVerified = p718Input.stagePteVerified;
+                p719Input.stageBytes = p718Input.stageBytes;
+                p719Input.stageGpuVa = p718Input.stageGpuVa;
+                p719Input.gartStart = p718Input.gartStart;
+                p719Input.gartEnd = p718Input.gartEnd;
+                // IMU I/D source independently pinned; do not borrow
+                // metadata or acceptance from the preceding firmware.
+                uint32_t p719FwVersion = 0u;
+#if defined(RN_HAVE_NAVI33_GC_IMU_FW) && \
+    defined(RN_NAVI33_GC_IMU_FW_METADATA_V1) && \
+    defined(RN_NAVI33_GC_IMU_FW_SOURCE_VERIFIED)
+                p719Input.firmwarePresent = kRNNavi33GcImuIBytes > 0u;
+                p719Input.firmwareMetadataVerified =
+                    kRNNavi33GcImuSourceBytes == 132352u &&
+                    kRNNavi33GcImuIBytes == 66048u &&
+                    kRNNavi33GcImuDBytes == 66048u;
+                p719Input.firmwareSourceVerified =
+                    RN_NAVI33_GC_IMU_FW_SOURCE_VERIFIED == 1;
+                p719Input.firmwareIpMajor = kRNNavi33GcImuIpMajor;
+                p719Input.firmwareIpMinor = kRNNavi33GcImuIpMinor;
+                p719Input.firmwareIpRevision = kRNNavi33GcImuIpRevision;
+                p719Input.firmwareBytes = kRNNavi33GcImuIBytes;
+                p719FwVersion = kRNNavi33GcImuVersion;
+#endif
+                const auto p719Gate =
+                    rn_navi33::p719_imu_i::inspect(p719Input);
+
+                bool p719FenceOk = false;
+                bool p719Submitted = false;
+                bool p719ResponseValid = false;
+                bool p719Accepted = false;
+                uint32_t p719Status = 0xffffffffu;
+                uint32_t p719FwAddrLo = 0u, p719FwAddrHi = 0u;
+                uint32_t p719TransportError = 0u;
+                bool p719Quarantined = p7SubmitTransportQuarantined;
+                uint32_t p719WptrBefore = 0u, p719WptrAfter = 0u;
+                uint32_t p719RptrBefore = 0u, p719RptrAfterKick = 0u;
+                uint32_t p719RptrFinal = 0u;
+                uint32_t p719FenceBefore = 0u, p719FenceExpected = 0u;
+                uint32_t p719FenceObserved = 0u, p719FencePolls = 0u;
+
+#ifdef RN_HAVE_NAVI33_GC_IMU_FW
+                if (p719Gate.mayLoad &&
+                    pspFence == rn_navi33::p719_imu_i::kPriorFence &&
+                    !p7SubmitTransportQuarantined &&
+                    navi33PmfwBuf && navi33PmfwBuf->getBytesNoCopy() &&
+                    sizeof(kRNNavi33GcImuIFw) ==
+                        static_cast<size_t>(kRNNavi33GcImuIBytes)) {
+                    // Staged from independently pinned IMU I payload;
+                    // this does NOT start IMU or RLC.
+                    uint8_t *const stage = static_cast<uint8_t *>(
+                        navi33PmfwBuf->getBytesNoCopy());
+                    memset(stage, 0, navi33PmfwStageBytes);
+                    memcpy(stage, kRNNavi33GcImuIFw,
+                           kRNNavi33GcImuIBytes);
+                    __sync_synchronize();
+
+                    uint32_t resp[4] = {
+                        0xffffffffu, 0xffffffffu,
+                        0xffffffffu, 0xffffffffu
+                    };
+                    p719FenceOk = pspSubmitP7(
+                        p71RingGpuVa, p71CmdGpuVa, p71FenceGpuVa,
+                        rn_navi33::p719_imu_i::kCommandId,
+                        p719Gate.words,
+                        rn_navi33::p719_imu_i::kArgumentCount,
+                        resp, 4u);
+                    p719Submitted = p7SubmitWasIssued;
+                    p719ResponseValid = p7SubmitResponseValid;
+                    p719TransportError = p7SubmitTransportError;
+                    p719Quarantined = p7SubmitTransportQuarantined;
+                    p719WptrBefore = p7SubmitWptrBefore;
+                    p719WptrAfter = p7SubmitWptrAfter;
+                    p719RptrBefore = p7SubmitRptrBefore;
+                    p719RptrAfterKick = p7SubmitRptrAfterKick;
+                    p719RptrFinal = p7SubmitRptrFinal;
+                    p719FenceBefore = p7SubmitFenceBefore;
+                    p719FenceExpected = p7SubmitFenceExpected;
+                    p719FenceObserved = p7SubmitFenceObserved;
+                    p719FencePolls = p7SubmitPolls;
+                    if (p719ResponseValid) {
+                        p719Status = resp[0];
+                        p719FwAddrLo = resp[2];
+                        p719FwAddrHi = resp[3];
+                    }
+                    p719Accepted = p719FenceOk && p719ResponseValid &&
+                        p719Status == 0u &&
+                        p719FenceExpected ==
+                            rn_navi33::p719_imu_i::kExpectedFence &&
+                        p719FenceObserved ==
+                            rn_navi33::p719_imu_i::kExpectedFence;
+                } else if (p719Gate.mayLoad) {
+                    p719TransportError = 10u;
+                }
+#endif
+
+                const char *const p719Names[] = {
+                    "step", "gate_error", "requested", "explicit_opt_in",
+                    "may_load", "firmware_present", "metadata_verified",
+                    "source_verified", "observed_gc_revision",
+                    "firmware_gc_revision", "firmware_version",
+                    "firmware_bytes", "stage_capacity", "stage_mapped",
+                    "stage_pte_verified", "stage_va_lo", "stage_va_hi",
+                    "command_id", "fw_type", "prior_fence_expected",
+                    "prior_fence_observed", "pfp_accepted",
+                    "p0_accepted", "p1_accepted", "me_accepted",
+                    "me_p0_accepted", "me_p1_accepted", "mec_accepted",
+                    "rlc_g_accepted", "stage_expansion_verified",
+                    "stage_expand_opt_in",
+                    "stage_plan_error", "sdma_both_accepted", "submitted",
+                    "submit_wptr_before", "submit_wptr_after",
+                    "submit_rptr_before", "submit_rptr_after_kick",
+                    "submit_rptr_final", "fence_before", "fence_expected",
+                    "fence_observed", "fence_polls", "fence_ok",
+                    "response_valid", "status", "fw_addr_lo", "fw_addr_hi",
+                    "transport_error", "transport_quarantined",
+                    "accepted", "gc_imu_i_loaded",
+                    "gc_engine_started"
+                };
+                const uint32_t p719Values[] = {
+                    p7StepArg, static_cast<uint32_t>(p719Gate.error),
+                    static_cast<uint32_t>(p719Input.requested),
+                    static_cast<uint32_t>(p719OptIn),
+                    static_cast<uint32_t>(p719Gate.mayLoad),
+                    static_cast<uint32_t>(p719Input.firmwarePresent),
+                    static_cast<uint32_t>(p719Input.firmwareMetadataVerified),
+                    static_cast<uint32_t>(p719Input.firmwareSourceVerified),
+                    p719Input.observedGcRevision,
+                    p719Input.firmwareIpRevision, p719FwVersion,
+                    static_cast<uint32_t>(p719Input.firmwareBytes),
+                    static_cast<uint32_t>(p719Input.stageBytes),
+                    static_cast<uint32_t>(p719Input.stageMapped),
+                    static_cast<uint32_t>(p719Input.stagePteVerified),
+                    static_cast<uint32_t>(p719Input.stageGpuVa),
+                    static_cast<uint32_t>(p719Input.stageGpuVa >> 32),
+                    rn_navi33::p719_imu_i::kCommandId,
+                    rn_navi33::p719_imu_i::kFirmwareType,
+                    p719Input.previousFenceExpected,
+                    p719Input.previousFenceObserved,
+                    static_cast<uint32_t>(p77Accepted),
+                    static_cast<uint32_t>(p78Accepted),
+                    static_cast<uint32_t>(p79Accepted),
+                    static_cast<uint32_t>(p710Accepted),
+                    static_cast<uint32_t>(p711Accepted),
+                    static_cast<uint32_t>(p712Accepted),
+                    static_cast<uint32_t>(p713Accepted),
+                    static_cast<uint32_t>(p718Accepted),
+                    static_cast<uint32_t>(p719Input.stageExpansionVerified),
+                    static_cast<uint32_t>(p713StageOptIn),
+                    static_cast<uint32_t>(p713StagePlan.error),
+                    static_cast<uint32_t>(p719Input.sdmaBothAccepted),
+                    static_cast<uint32_t>(p719Submitted),
+                    p719WptrBefore, p719WptrAfter,
+                    p719RptrBefore, p719RptrAfterKick, p719RptrFinal,
+                    p719FenceBefore, p719FenceExpected,
+                    p719FenceObserved, p719FencePolls,
+                    static_cast<uint32_t>(p719FenceOk),
+                    static_cast<uint32_t>(p719ResponseValid),
+                    p719Status, p719FwAddrLo, p719FwAddrHi,
+                    p719TransportError, static_cast<uint32_t>(p719Quarantined),
+                    static_cast<uint32_t>(p719Accepted),
+                    static_cast<uint32_t>(p719Accepted),
+                    0u
+                };
+                rnPublish(this, "navi33-p7-gc-imu-i-runtime",
+                          p719Names, p719Values,
+                          sizeof(p719Values) / sizeof(p719Values[0]));
+                // P7.20: IMU_D PSP LOAD_IP_FW type 69
+                // after IMU_I fence 18. No IMU execution.
+                uint32_t p720OptInRaw = 0u;
+                const bool p720OptIn =
+                    PE_parse_boot_argn(
+                        "rednavi_navi33_p720_imu_d",
+                        &p720OptInRaw, sizeof(p720OptInRaw)) &&
+                    p720OptInRaw == 1u;
+                rn_navi33::p720_imu_d::Input p720Input{};
+                p720Input.requested = p7StepArg >= 22u;
+                p720Input.explicitOptIn = p720OptIn;
+                p720Input.identityVerified = p719Input.identityVerified;
+                p720Input.observedGcMajor = p719Input.observedGcMajor;
+                p720Input.observedGcMinor = p719Input.observedGcMinor;
+                p720Input.observedGcRevision = p719Input.observedGcRevision;
+                p720Input.pspRingReady = p719Input.pspRingReady;
+                p720Input.tmrAccepted = p74Accepted;
+                p720Input.sdmaBothAccepted = p719Input.sdmaBothAccepted;
+                p720Input.pfpAccepted = p77Accepted;
+                p720Input.p0Accepted = p78Accepted;
+                p720Input.p1Accepted = p79Accepted;
+                p720Input.meAccepted = p710Accepted;
+                p720Input.meP0Accepted = p711Accepted;
+                p720Input.meP1Accepted = p712Accepted;
+                p720Input.mecAccepted = p713Accepted;
+                p720Input.imuIAccepted = p719Accepted;
+                p720Input.stageExpansionVerified =
+                    p713StagePlan.mayExpand && p73StagePrepared &&
+                    p73StageMapped && p73StagePteVerified &&
+                    navi33PmfwStageBytes == p713StagePlan.targetStageBytes;
+                p720Input.previousFenceExpected = p719FenceExpected;
+                p720Input.previousFenceObserved = p719FenceObserved;
+                p720Input.transportHealthy =
+                    p719FenceOk && p719ResponseValid &&
+                    p719TransportError == 0u &&
+                    !p719Quarantined && !p7SubmitTransportQuarantined;
+                p720Input.stageOwnerRetained = p719Input.stageOwnerRetained;
+                p720Input.stageMapped = p719Input.stageMapped;
+                p720Input.stagePteVerified = p719Input.stagePteVerified;
+                p720Input.stageBytes = p719Input.stageBytes;
+                p720Input.stageGpuVa = p719Input.stageGpuVa;
+                p720Input.gartStart = p719Input.gartStart;
+                p720Input.gartEnd = p719Input.gartEnd;
+                // IMU I/D source independently pinned; do not borrow
+                // metadata or acceptance from the preceding firmware.
+                uint32_t p720FwVersion = 0u;
+#if defined(RN_HAVE_NAVI33_GC_IMU_FW) && \
+    defined(RN_NAVI33_GC_IMU_FW_METADATA_V1) && \
+    defined(RN_NAVI33_GC_IMU_FW_SOURCE_VERIFIED)
+                p720Input.firmwarePresent = kRNNavi33GcImuDBytes > 0u;
+                p720Input.firmwareMetadataVerified =
+                    kRNNavi33GcImuSourceBytes == 132352u &&
+                    kRNNavi33GcImuIBytes == 66048u &&
+                    kRNNavi33GcImuDBytes == 66048u;
+                p720Input.firmwareSourceVerified =
+                    RN_NAVI33_GC_IMU_FW_SOURCE_VERIFIED == 1;
+                p720Input.firmwareIpMajor = kRNNavi33GcImuIpMajor;
+                p720Input.firmwareIpMinor = kRNNavi33GcImuIpMinor;
+                p720Input.firmwareIpRevision = kRNNavi33GcImuIpRevision;
+                p720Input.firmwareBytes = kRNNavi33GcImuDBytes;
+                p720FwVersion = kRNNavi33GcImuVersion;
+#endif
+                const auto p720Gate =
+                    rn_navi33::p720_imu_d::inspect(p720Input);
+
+                bool p720FenceOk = false;
+                bool p720Submitted = false;
+                bool p720ResponseValid = false;
+                bool p720Accepted = false;
+                uint32_t p720Status = 0xffffffffu;
+                uint32_t p720FwAddrLo = 0u, p720FwAddrHi = 0u;
+                uint32_t p720TransportError = 0u;
+                bool p720Quarantined = p7SubmitTransportQuarantined;
+                uint32_t p720WptrBefore = 0u, p720WptrAfter = 0u;
+                uint32_t p720RptrBefore = 0u, p720RptrAfterKick = 0u;
+                uint32_t p720RptrFinal = 0u;
+                uint32_t p720FenceBefore = 0u, p720FenceExpected = 0u;
+                uint32_t p720FenceObserved = 0u, p720FencePolls = 0u;
+
+#ifdef RN_HAVE_NAVI33_GC_IMU_FW
+                if (p720Gate.mayLoad &&
+                    pspFence == rn_navi33::p720_imu_d::kPriorFence &&
+                    !p7SubmitTransportQuarantined &&
+                    navi33PmfwBuf && navi33PmfwBuf->getBytesNoCopy() &&
+                    sizeof(kRNNavi33GcImuDFw) ==
+                        static_cast<size_t>(kRNNavi33GcImuDBytes)) {
+                    // Staged from independently pinned IMU D payload;
+                    // this does NOT start IMU or RLC.
+                    uint8_t *const stage = static_cast<uint8_t *>(
+                        navi33PmfwBuf->getBytesNoCopy());
+                    memset(stage, 0, navi33PmfwStageBytes);
+                    memcpy(stage, kRNNavi33GcImuDFw,
+                           kRNNavi33GcImuDBytes);
+                    __sync_synchronize();
+
+                    uint32_t resp[4] = {
+                        0xffffffffu, 0xffffffffu,
+                        0xffffffffu, 0xffffffffu
+                    };
+                    p720FenceOk = pspSubmitP7(
+                        p71RingGpuVa, p71CmdGpuVa, p71FenceGpuVa,
+                        rn_navi33::p720_imu_d::kCommandId,
+                        p720Gate.words,
+                        rn_navi33::p720_imu_d::kArgumentCount,
+                        resp, 4u);
+                    p720Submitted = p7SubmitWasIssued;
+                    p720ResponseValid = p7SubmitResponseValid;
+                    p720TransportError = p7SubmitTransportError;
+                    p720Quarantined = p7SubmitTransportQuarantined;
+                    p720WptrBefore = p7SubmitWptrBefore;
+                    p720WptrAfter = p7SubmitWptrAfter;
+                    p720RptrBefore = p7SubmitRptrBefore;
+                    p720RptrAfterKick = p7SubmitRptrAfterKick;
+                    p720RptrFinal = p7SubmitRptrFinal;
+                    p720FenceBefore = p7SubmitFenceBefore;
+                    p720FenceExpected = p7SubmitFenceExpected;
+                    p720FenceObserved = p7SubmitFenceObserved;
+                    p720FencePolls = p7SubmitPolls;
+                    if (p720ResponseValid) {
+                        p720Status = resp[0];
+                        p720FwAddrLo = resp[2];
+                        p720FwAddrHi = resp[3];
+                    }
+                    p720Accepted = p720FenceOk && p720ResponseValid &&
+                        p720Status == 0u &&
+                        p720FenceExpected ==
+                            rn_navi33::p720_imu_d::kExpectedFence &&
+                        p720FenceObserved ==
+                            rn_navi33::p720_imu_d::kExpectedFence;
+                } else if (p720Gate.mayLoad) {
+                    p720TransportError = 10u;
+                }
+#endif
+
+                const char *const p720Names[] = {
+                    "step", "gate_error", "requested", "explicit_opt_in",
+                    "may_load", "firmware_present", "metadata_verified",
+                    "source_verified", "observed_gc_revision",
+                    "firmware_gc_revision", "firmware_version",
+                    "firmware_bytes", "stage_capacity", "stage_mapped",
+                    "stage_pte_verified", "stage_va_lo", "stage_va_hi",
+                    "command_id", "fw_type", "prior_fence_expected",
+                    "prior_fence_observed", "pfp_accepted",
+                    "p0_accepted", "p1_accepted", "me_accepted",
+                    "me_p0_accepted", "me_p1_accepted", "mec_accepted",
+                    "imu_i_accepted", "stage_expansion_verified",
+                    "stage_expand_opt_in",
+                    "stage_plan_error", "sdma_both_accepted", "submitted",
+                    "submit_wptr_before", "submit_wptr_after",
+                    "submit_rptr_before", "submit_rptr_after_kick",
+                    "submit_rptr_final", "fence_before", "fence_expected",
+                    "fence_observed", "fence_polls", "fence_ok",
+                    "response_valid", "status", "fw_addr_lo", "fw_addr_hi",
+                    "transport_error", "transport_quarantined",
+                    "accepted", "gc_imu_d_loaded",
+                    "gc_engine_started"
+                };
+                const uint32_t p720Values[] = {
+                    p7StepArg, static_cast<uint32_t>(p720Gate.error),
+                    static_cast<uint32_t>(p720Input.requested),
+                    static_cast<uint32_t>(p720OptIn),
+                    static_cast<uint32_t>(p720Gate.mayLoad),
+                    static_cast<uint32_t>(p720Input.firmwarePresent),
+                    static_cast<uint32_t>(p720Input.firmwareMetadataVerified),
+                    static_cast<uint32_t>(p720Input.firmwareSourceVerified),
+                    p720Input.observedGcRevision,
+                    p720Input.firmwareIpRevision, p720FwVersion,
+                    static_cast<uint32_t>(p720Input.firmwareBytes),
+                    static_cast<uint32_t>(p720Input.stageBytes),
+                    static_cast<uint32_t>(p720Input.stageMapped),
+                    static_cast<uint32_t>(p720Input.stagePteVerified),
+                    static_cast<uint32_t>(p720Input.stageGpuVa),
+                    static_cast<uint32_t>(p720Input.stageGpuVa >> 32),
+                    rn_navi33::p720_imu_d::kCommandId,
+                    rn_navi33::p720_imu_d::kFirmwareType,
+                    p720Input.previousFenceExpected,
+                    p720Input.previousFenceObserved,
+                    static_cast<uint32_t>(p77Accepted),
+                    static_cast<uint32_t>(p78Accepted),
+                    static_cast<uint32_t>(p79Accepted),
+                    static_cast<uint32_t>(p710Accepted),
+                    static_cast<uint32_t>(p711Accepted),
+                    static_cast<uint32_t>(p712Accepted),
+                    static_cast<uint32_t>(p713Accepted),
+                    static_cast<uint32_t>(p719Accepted),
+                    static_cast<uint32_t>(p720Input.stageExpansionVerified),
+                    static_cast<uint32_t>(p713StageOptIn),
+                    static_cast<uint32_t>(p713StagePlan.error),
+                    static_cast<uint32_t>(p720Input.sdmaBothAccepted),
+                    static_cast<uint32_t>(p720Submitted),
+                    p720WptrBefore, p720WptrAfter,
+                    p720RptrBefore, p720RptrAfterKick, p720RptrFinal,
+                    p720FenceBefore, p720FenceExpected,
+                    p720FenceObserved, p720FencePolls,
+                    static_cast<uint32_t>(p720FenceOk),
+                    static_cast<uint32_t>(p720ResponseValid),
+                    p720Status, p720FwAddrLo, p720FwAddrHi,
+                    p720TransportError, static_cast<uint32_t>(p720Quarantined),
+                    static_cast<uint32_t>(p720Accepted),
+                    static_cast<uint32_t>(p720Accepted),
+                    0u
+                };
+                rnPublish(this, "navi33-p7-gc-imu-d-runtime",
+                          p720Names, p720Values,
+                          sizeof(p720Values) / sizeof(p720Values[0]));
                 // Dedicated preflight telemetry makes it possible to
                 // prove mapping expansion separately from PSP command.
                 const char *const p713StageNames[] = {
