@@ -25,6 +25,7 @@ enum class Error : uint8_t {
     WrongStep,
     WrongAsic,
     WrongMp1Revision,
+    UnsupportedNbioVersion,
     PmfwNotAccepted,
     PriorFenceMismatch,
     TransportUnhealthy,
@@ -37,6 +38,10 @@ struct Input {
     uint32_t step = 0;
     bool exactNavi33 = false;
     uint32_t mp1Revision = 0;
+    // Real NBIF_HWID 108 IP Discovery version, not assumed from PCI ID.
+    uint32_t nbioMajor = 0;
+    uint32_t nbioMinor = 0;
+    uint32_t nbioRevision = 0;
     bool pmfwAccepted = false;
     uint32_t priorFenceExpected = 0;
     uint32_t priorFenceObserved = 0;
@@ -69,6 +74,16 @@ inline bool checkedNbifOffsets(uint32_t baseDword, uint64_t bar5Bytes,
     return true;
 }
 
+// Linux amdgpu_discovery.c assigns NBIO v7.11.0..v7.11.3 to
+// nbio_v7_11_funcs. Its PF1 RSMU_INDEX / RSMU_DATA registers are
+// DWORD 0/1 relative to NBIF segment 1 (not segment 0). All other
+// versions fail CLOSED, including v7.11.4+ (different Linux funcs)
+// and v7.7.x (PF0, not PF1).
+inline bool supportedPf1RsmuVersion(uint32_t major, uint32_t minor,
+                                   uint32_t revision) {
+    return major == 7u && minor == 11u && revision <= 3u;
+}
+
 inline Report inspect(const Input &in) {
     Report r{};
     if (!in.requested) return r;
@@ -76,6 +91,10 @@ inline Report inspect(const Input &in) {
     if (in.step != 27u) { r.error = Error::WrongStep; return r; }
     if (!in.exactNavi33) { r.error = Error::WrongAsic; return r; }
     if (in.mp1Revision != 7u) { r.error = Error::WrongMp1Revision; return r; }
+    if (!supportedPf1RsmuVersion(in.nbioMajor, in.nbioMinor,
+                                 in.nbioRevision)) {
+        r.error = Error::UnsupportedNbioVersion; return r;
+    }
     if (!in.pmfwAccepted) { r.error = Error::PmfwNotAccepted; return r; }
     if (in.priorFenceExpected != kPriorFence ||
         in.priorFenceObserved != kPriorFence) {

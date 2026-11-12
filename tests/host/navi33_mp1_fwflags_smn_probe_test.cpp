@@ -7,6 +7,9 @@ static Input ready() {
     i.requested = i.explicitOptIn = i.exactNavi33 = true;
     i.step = 27;
     i.mp1Revision = 7;
+    i.nbioMajor = 7;
+    i.nbioMinor = 11;
+    i.nbioRevision = 2;
     i.pmfwAccepted = true;
     i.priorFenceExpected = i.priorFenceObserved = 23;
     i.transportHealthy = true;
@@ -22,6 +25,18 @@ static void rejects(Input i, Error error) {
 int main() {
     static_assert(kSmnMp1FirmwareFlags == 0x03b10028u, "Navi33 MP1 SMN");
     static_assert(kInterruptsEnabledMask == 1u, "Linux MP1 bit0");
+    // Linux amdgpu_discovery.c selects nbio_v7_11_funcs only for
+    // NBIO IP 7.11.0..7.11.3. These use PF1 RSMU index/data
+    // at NBIF segment 1 DWORD offsets 0 and 1.
+    assert(supportedPf1RsmuVersion(7, 11, 0));
+    assert(supportedPf1RsmuVersion(7, 11, 1));
+    assert(supportedPf1RsmuVersion(7, 11, 2));
+    assert(supportedPf1RsmuVersion(7, 11, 3));
+    assert(!supportedPf1RsmuVersion(7, 11, 4));
+    assert(!supportedPf1RsmuVersion(7, 11, 5));
+    assert(!supportedPf1RsmuVersion(7, 7, 1));
+    assert(!supportedPf1RsmuVersion(4, 0, 0));
+    assert(!supportedPf1RsmuVersion(0, 0, 0));
     auto r = inspect(ready());
     assert(r.mayProbe && r.error == Error::Ok);
     assert(r.indexByteOffset == 0x5000u*4u);
@@ -36,6 +51,16 @@ int main() {
     { auto i=ready(); i.step=26; rejects(i, Error::WrongStep); }
     { auto i=ready(); i.exactNavi33=false; rejects(i, Error::WrongAsic); }
     { auto i=ready(); i.mp1Revision=10; rejects(i, Error::WrongMp1Revision); }
+    { auto i=ready(); i.nbioMajor=4; i.nbioMinor=0; i.nbioRevision=0;
+      rejects(i, Error::UnsupportedNbioVersion); }
+    { auto i=ready(); i.nbioMinor=7; i.nbioRevision=1;
+      rejects(i, Error::UnsupportedNbioVersion); }
+    { auto i=ready(); i.nbioRevision=4;
+      rejects(i, Error::UnsupportedNbioVersion); }
+    { auto i=ready(); i.nbioRevision=5;
+      rejects(i, Error::UnsupportedNbioVersion); }
+    { auto i=ready(); i.nbioMajor=0;
+      rejects(i, Error::UnsupportedNbioVersion); }
     { auto i=ready(); i.pmfwAccepted=false; rejects(i, Error::PmfwNotAccepted); }
     { auto i=ready(); i.priorFenceObserved=22; rejects(i, Error::PriorFenceMismatch); }
     { auto i=ready(); i.transportHealthy=false; rejects(i, Error::TransportUnhealthy); }
