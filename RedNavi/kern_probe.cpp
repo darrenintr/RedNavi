@@ -129,6 +129,8 @@
 #include "navi33_p725_rlc_autoload.h"
 #include "navi33_rlc_readonly_preflight.h"
 #include "navi33_mp1_fwflags_smn_probe.h"
+#include "navi33_smu_mailbox_admission.h"
+#include "navi33_smu_mailbox_roundtrip.h"
 #include "navi33_gc_queue_bringup.h"
 #include "navi33_p713_stage_expand.h"
 #include "navi33_p7_pmfw.h"
@@ -9982,6 +9984,113 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-p7-mp1-fwflags",
                     p726Names, p726Values,
                     sizeof(p726Values) / sizeof(p726Values[0]));
+
+                // P7.27: prepare a bounded one-shot SMU GetSmuVersion
+                // transcript. No hardware mailbox lease has yet been
+                // proven. Merely owning the IOPCIDevice, mapping BAR5,
+                // or reading response=1 is NOT such a lease. Fail
+                // closed on real hardware even if unsafe build and
+                // explicit opt-in are enabled. P7.25 RLC gates remain
+                // independent and must not consume this synthetic plan.
+                namespace p727a = rn_navi33::smu_mailbox_admission;
+                namespace p727r = rn_navi33::smu_mailbox_roundtrip;
+                uint32_t p727OptInRaw = 0u;
+                const bool p727OptIn =
+                    PE_parse_boot_argn("rn727smu", &p727OptInRaw,
+                                       sizeof(p727OptInRaw)) &&
+                    p727OptInRaw == 1u;
+#ifdef RN_ENABLE_NAVI33_SMU_MAILBOX_UNSAFE
+                constexpr bool p727UnsafeBuild = true;
+#else
+                constexpr bool p727UnsafeBuild = false;
+#endif
+                const auto p727Registers =
+                    p727r::plan(p725Mp1Found ? p725Mp1Base : 0u,
+                                regs->getLength());
+                // The exact host + firmware MP1 ownership contract is
+                // currently unimplemented. It must be demonstrated by
+                // independent device arbitration before changing this.
+                constexpr bool p727MailboxLeaseHeld = false;
+                p727a::Input p727Input{};
+                p727Input.requested = p7StepArg >= 27u;
+                p727Input.explicitOptIn = p727OptIn;
+                p727Input.unsafeBuildEnabled = p727UnsafeBuild;
+                p727Input.exactNavi33 = p726Input.exactNavi33;
+                p727Input.mp1Major = check.observed.smu.major;
+                p727Input.mp1Minor = check.observed.smu.minor;
+                p727Input.mp1Revision = check.observed.smu.revision;
+                p727Input.mailboxLeaseHeld = p727MailboxLeaseHeld;
+                p727Input.pspReady = p724Input.pspRingReady;
+                p727Input.pmfwAccepted = p73PmfwAccepted;
+                p727Input.priorFenceExpected = p724FenceExpected;
+                p727Input.priorFenceObserved = p724FenceObserved;
+                p727Input.pspTransportHealthy = p725Input.transportHealthy;
+                p727Input.addressesVerified =
+                    p725Mp1Found && p727Registers.valid;
+                p727Input.responseBefore =
+                    p725PreInput.smuMailboxRead
+                    ? p725PreInput.smuResponse : p727a::kInvalid;
+                const auto p727Admission = p727a::inspect(p727Input);
+                bool p727OneShotConsumed = false;
+                const auto p727Roundtrip = p727r::execute(
+                    p727Admission, p727Registers, p727MailboxLeaseHeld,
+                    p727OneShotConsumed,
+                    [&](uint32_t offset) { return rd(offset); },
+                    [&](uint32_t offset, uint32_t value) {
+                        wr(offset, value);
+                    },
+                    [&]() { IODelay(p727r::kPauseMicroseconds); });
+                const char *const p727Names[] = {
+                    "step", "requested", "explicit_opt_in",
+                    "unsafe_build_enabled", "mailbox_lease_held",
+                    "admission_error", "may_submit",
+                    "mp1_base_dword", "bar5_bytes",
+                    "registers_verified", "message_byte_offset",
+                    "parameter_byte_offset", "response_byte_offset",
+                    "response_before", "attempted",
+                    "response_clear_written", "parameter_clear_written",
+                    "response_zero_observed", "command_sent",
+                    "response_transition_observed", "response_after",
+                    "version_read", "version", "polls", "timed_out",
+                    "transaction_error", "handshake_verified",
+                    "lease_quarantined"
+                };
+                const uint32_t p727Values[] = {
+                    p7StepArg, static_cast<uint32_t>(p727Input.requested),
+                    static_cast<uint32_t>(p727OptIn),
+                    static_cast<uint32_t>(p727UnsafeBuild),
+                    static_cast<uint32_t>(p727MailboxLeaseHeld),
+                    static_cast<uint32_t>(p727Admission.error),
+                    static_cast<uint32_t>(p727Admission.maySubmit),
+                    p725Mp1Base,
+                    static_cast<uint32_t>(regs->getLength()),
+                    static_cast<uint32_t>(p727Registers.valid),
+                    p727Registers.messageByteOffset,
+                    p727Registers.parameterByteOffset,
+                    p727Registers.responseByteOffset,
+                    p727Input.responseBefore,
+                    static_cast<uint32_t>(p727Roundtrip.attempted),
+                    static_cast<uint32_t>(p727Roundtrip.responseClearWritten),
+                    static_cast<uint32_t>(p727Roundtrip.parameterClearWritten),
+                    static_cast<uint32_t>(
+                        p727Roundtrip.transcript.responseClearedToZeroObserved),
+                    static_cast<uint32_t>(
+                        p727Roundtrip.transcript.commandSubmitted),
+                    static_cast<uint32_t>(
+                        p727Roundtrip.transcript.responseTransitionObserved),
+                    p727Roundtrip.transcript.responseAfter,
+                    static_cast<uint32_t>(
+                        p727Roundtrip.transcript.argumentRead),
+                    p727Roundtrip.transcript.versionResult,
+                    p727Roundtrip.transcript.polls,
+                    static_cast<uint32_t>(p727Roundtrip.transcript.timedOut),
+                    static_cast<uint32_t>(p727Roundtrip.error),
+                    static_cast<uint32_t>(p727Roundtrip.verified),
+                    static_cast<uint32_t>(p727Roundtrip.quarantineLease)
+                };
+                rnPublish(this, "navi33-p7-smu-roundtrip",
+                    p727Names, p727Values,
+                    sizeof(p727Values) / sizeof(p727Values[0]));
 
                 const auto p725Gate =
                     rn_navi33::p725_rlc_autoload::inspect(p725Input);

@@ -58,6 +58,9 @@ ifneq ($(wildcard RedNavi/navi33_mes_fw.h),)
 CXXFLAGS += -DRN_HAVE_NAVI33_MES_FW
 endif
 # PSP AUTOLOAD_RLC can START RLC hardware: never build active by default.
+ifeq ($(NAVI33_SMU_MAILBOX_UNSAFE),1)
+CXXFLAGS += -DRN_ENABLE_NAVI33_SMU_MAILBOX_UNSAFE
+endif
 ifeq ($(NAVI33_RLC_AUTOLOAD_UNSAFE),1)
 CXXFLAGS += -DRN_ENABLE_NAVI33_RLC_AUTOLOAD_UNSAFE
 endif
@@ -324,6 +327,8 @@ test:
 	./build/navi33_rlc_readonly_preflight_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_smu_mailbox_admission_test.cpp -o build/navi33_smu_mailbox_admission_test
 	./build/navi33_smu_mailbox_admission_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_smu_mailbox_roundtrip_test.cpp -o build/navi33_smu_mailbox_roundtrip_test
+	./build/navi33_smu_mailbox_roundtrip_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_mp1_fwflags_smn_probe_test.cpp -o build/navi33_mp1_fwflags_smn_probe_test
 	./build/navi33_mp1_fwflags_smn_probe_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_gc_queue_bringup_test.cpp -o build/navi33_gc_queue_bringup_test
