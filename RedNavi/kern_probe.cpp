@@ -128,6 +128,7 @@
 #include "navi33_p724_mes_kiq_data.h"
 #include "navi33_p725_rlc_autoload.h"
 #include "navi33_rlc_readonly_preflight.h"
+#include "navi33_mp1_fwflags_smn_probe.h"
 #include "navi33_gc_queue_bringup.h"
 #include "navi33_p713_stage_expand.h"
 #include "navi33_p7_pmfw.h"
@@ -9818,6 +9819,110 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-p7-rlc-preflight",
                     p725PreNames, p725PreValues,
                     sizeof(p725PreValues) / sizeof(p725PreValues[0]));
+
+                // Opt-in MP1 firmware-flags SMN read. Unlike the
+                // BAR5 C2PMSG mailbox, this uses NBIF RSMU index/data.
+                // Index selection is an MMIO WRITE, so it is OFF by
+                // default, even though the target firmware flag is
+                // read-only. This is NOT an SMU GetSmuVersion message,
+                // does not enable autoload, and does not claim a live
+                // SMU command/response handshake.
+                uint32_t p726OptInArg = 0u;
+                const bool p726OptIn =
+                    PE_parse_boot_argn(
+                        "rednavi_navi33_p726_mp1_fwflags",
+                        &p726OptInArg, sizeof(p726OptInArg)) &&
+                    p726OptInArg == 1u;
+                uint32_t p726NbifBase = 0u;
+                const bool p726NbifPresent =
+                    ipBase(108, &p726NbifBase, 1);
+                rn_navi33::mp1_fwflags_smn_probe::Input p726Input{};
+                p726Input.requested = p7StepArg >= 27u;
+                p726Input.explicitOptIn = p726OptIn;
+                p726Input.step = p7StepArg;
+                p726Input.exactNavi33 = p724Input.identityVerified &&
+                    p724Input.observedGcMajor == 11u &&
+                    p724Input.observedGcMinor == 0u &&
+                    p724Input.observedGcRevision == 2u;
+                p726Input.mp1Revision = p73HardwareMp1Revision;
+                p726Input.pmfwAccepted = p73PmfwAccepted;
+                p726Input.priorFenceExpected = p724FenceExpected;
+                p726Input.priorFenceObserved = p724FenceObserved;
+                p726Input.transportHealthy =
+                    p724Accepted && !p7SubmitTransportQuarantined;
+                p726Input.nbifBaseFound = p726NbifPresent;
+                p726Input.nbifBaseDword = p726NbifBase;
+                p726Input.bar5Bytes = regs->getLength();
+                const auto p726Gate =
+                    rn_navi33::mp1_fwflags_smn_probe::inspect(p726Input);
+                uint32_t p726IndexBefore = 0xffffffffu;
+                uint32_t p726IndexAfter = 0xffffffffu;
+                uint32_t p726FirmwareFlags = 0xffffffffu;
+                bool p726IndexWritten = false;
+                bool p726IndexRestored = false;
+                bool p726ValueValid = false;
+                if (p726Gate.mayProbe) {
+                    // If the original index is unreadable, refuse to
+                    // touch the index register; no safe restore is
+                    // possible. Otherwise select exactly one SMN
+                    // address, read data once, restore the original
+                    // index, and verify that restore.
+                    p726IndexBefore = rd(p726Gate.indexByteOffset);
+                    if (p726IndexBefore != 0xffffffffu) {
+                        wr(p726Gate.indexByteOffset,
+                            rn_navi33::mp1_fwflags_smn_probe::
+                                kSmnMp1FirmwareFlags);
+                        p726IndexWritten = true;
+                        p726FirmwareFlags =
+                            rd(p726Gate.dataByteOffset);
+                        wr(p726Gate.indexByteOffset,
+                            p726IndexBefore);
+                        p726IndexAfter =
+                            rd(p726Gate.indexByteOffset);
+                        p726IndexRestored =
+                            p726IndexAfter == p726IndexBefore;
+                        p726ValueValid = p726IndexRestored &&
+                            p726FirmwareFlags != 0xffffffffu;
+                    }
+                }
+                const char *const p726Names[] = {
+                    "step", "requested", "explicit_opt_in",
+                    "gate_error", "may_probe",
+                    "nbif_found", "nbif_base_dword",
+                    "bar5_bytes", "smn_address",
+                    "index_byte_offset", "data_byte_offset",
+                    "index_before", "index_written", "index_after",
+                    "index_restored", "fw_flags",
+                    "snapshot_valid", "interrupts_enabled",
+                    "smu_handshake_verified", "smu_command_sent",
+                    "rlc_autoload_submitted"
+                };
+                const uint32_t p726Values[] = {
+                    p7StepArg, static_cast<uint32_t>(
+                        p726Input.requested),
+                    static_cast<uint32_t>(p726OptIn),
+                    static_cast<uint32_t>(p726Gate.error),
+                    static_cast<uint32_t>(p726Gate.mayProbe),
+                    static_cast<uint32_t>(p726NbifPresent),
+                    p726NbifBase,
+                    static_cast<uint32_t>(p726Input.bar5Bytes),
+                    rn_navi33::mp1_fwflags_smn_probe::
+                        kSmnMp1FirmwareFlags,
+                    p726Gate.indexByteOffset, p726Gate.dataByteOffset,
+                    p726IndexBefore, static_cast<uint32_t>(
+                        p726IndexWritten), p726IndexAfter,
+                    static_cast<uint32_t>(p726IndexRestored),
+                    p726FirmwareFlags,
+                    static_cast<uint32_t>(p726ValueValid),
+                    static_cast<uint32_t>(
+                        rn_navi33::mp1_fwflags_smn_probe::
+                            interruptsEnabled(p726FirmwareFlags,
+                                              p726ValueValid)),
+                    0u, 0u, 0u
+                };
+                rnPublish(this, "navi33-p7-mp1-fwflags",
+                    p726Names, p726Values,
+                    sizeof(p726Values) / sizeof(p726Values[0]));
 
                 const auto p725Gate =
                     rn_navi33::p725_rlc_autoload::inspect(p725Input);
