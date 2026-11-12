@@ -127,6 +127,7 @@
 #include "navi33_p723_mes_kiq_code.h"
 #include "navi33_p724_mes_kiq_data.h"
 #include "navi33_p725_rlc_autoload.h"
+#include "navi33_rlc_readonly_preflight.h"
 #include "navi33_gc_queue_bringup.h"
 #include "navi33_p713_stage_expand.h"
 #include "navi33_p7_pmfw.h"
@@ -9720,6 +9721,104 @@ bool RedNaviProbe::start(IOService *provider) {
                 p725Input.runtimeOwnerRetained =
                     navi33PspRuntimePrepared && navi33PspRuntimeBuf &&
                     navi33PspRuntimeBuf->getBytesNoCopy();
+                // Read-only RLC preflight. Current PSP firmware loading
+                // order is not Linux-equivalent (RLC_G precedes IMU/MES)
+                // and no owned SMU command/response has been validated.
+                // Neither a stale SMU response=1 nor PSP firmware acceptance
+                // can authorize the first engine-starting PSP command.
+                uint32_t p725Gc0Base = 0u, p725Gc1Base = 0u;
+                uint32_t p725Mp1Base = 0u;
+                const bool p725Gc0Found =
+                    ipBase(kRNHwIdGc, &p725Gc0Base, 0);
+                const bool p725Gc1Found =
+                    ipBase(kRNHwIdGc, &p725Gc1Base, 1);
+                const bool p725Mp1Found =
+                    ipBase(kRNHwIdMp1, &p725Mp1Base, 0);
+                rn_navi33::rlc_readonly_preflight::Input p725PreInput{};
+                p725PreInput.requested = p7StepArg >= 27u;
+                p725PreInput.basesDiscovered =
+                    p725Gc0Found && p725Gc1Found && p725Mp1Found;
+                p725PreInput.gc0Base = p725Gc0Base;
+                p725PreInput.gc1Base = p725Gc1Base;
+                p725PreInput.mp1Base = p725Mp1Base;
+                p725PreInput.bar5Bytes = regs->getLength();
+                p725PreInput.pmfwAccepted = p73PmfwAccepted;
+                // Current MMIO read-only snapshot is NOT a live handshake.
+                p725PreInput.smuHandshakeVerified = false;
+                p725PreInput.rlcGFence = p718FenceExpected;
+                p725PreInput.imuIFence = p719FenceExpected;
+                p725PreInput.imuDFence = p720FenceExpected;
+                p725PreInput.mesSchedCodeFence = p721FenceExpected;
+                p725PreInput.mesSchedDataFence = p722FenceExpected;
+                p725PreInput.mesKiqCodeFence = p723FenceExpected;
+                p725PreInput.mesKiqDataFence = p724FenceExpected;
+
+                // Derive all byte offsets from discovered IP bases and
+                // bounded BAR5 length BEFORE accessing the registers.
+                const auto p725AddressPlan =
+                    rn_navi33::rlc_readonly_preflight::inspect(p725PreInput);
+                if (p725PreInput.requested &&
+                    p725AddressPlan.gcAddressesValid && p724Accepted) {
+                    p725PreInput.gcSamplesRead =
+                        readBar(p725Gc0Base,
+                            rn_navi33::rlc_readonly_preflight::kCpStatDword,
+                            &p725PreInput.cpStat) &&
+                        readBar(p725Gc1Base,
+                            rn_navi33::rlc_readonly_preflight::kRlcBootloadDword,
+                            &p725PreInput.rlcBootloadStatus) &&
+                        readBar(p725Gc1Base,
+                            rn_navi33::rlc_readonly_preflight::kImuScratchDword,
+                            &p725PreInput.imuScratch0);
+                    p725PreInput.smuMailboxRead = readBar(p725Mp1Base,
+                        rn_navi33::rlc_readonly_preflight::kSmuResponseDword,
+                        &p725PreInput.smuResponse);
+                }
+                const auto p725Preflight =
+                    rn_navi33::rlc_readonly_preflight::inspect(p725PreInput);
+                p725Input.readOnlyPreflightPassed = p725Preflight.mayAutoload;
+                const char *const p725PreNames[] = {
+                    "step", "blocker", "requested",
+                    "gc0_base_dword", "gc1_base_dword", "mp1_base_dword",
+                    "bar5_bytes_lo", "bar5_bytes_hi",
+                    "gc_addresses_verified", "gc_snapshot_readable",
+                    "cp_stat_byte_offset", "rlc_bootload_byte_offset",
+                    "imu_scratch_byte_offset", "smu_response_byte_offset",
+                    "cp_stat_readback", "rlc_bootload_readback",
+                    "imu_scratch0_readback", "smu_response_readback",
+                    "pmfw_firmware_accepted", "smu_mailbox_readable",
+                    "smu_handshake_verified", "firmware_order_matches_linux",
+                    "rlc_g_fence", "imu_i_fence", "imu_d_fence",
+                    "mes_sched_code_fence", "mes_sched_data_fence",
+                    "mes_kiq_code_fence", "mes_kiq_data_fence",
+                    "may_autoload"
+                };
+                const uint32_t p725PreValues[] = {
+                    p7StepArg, static_cast<uint32_t>(p725Preflight.error),
+                    static_cast<uint32_t>(p725PreInput.requested),
+                    p725Gc0Base, p725Gc1Base, p725Mp1Base,
+                    static_cast<uint32_t>(p725PreInput.bar5Bytes),
+                    static_cast<uint32_t>(p725PreInput.bar5Bytes >> 32),
+                    static_cast<uint32_t>(p725Preflight.gcAddressesValid),
+                    static_cast<uint32_t>(p725Preflight.gcSnapshotReadable),
+                    p725Preflight.cpStatByteOffset,
+                    p725Preflight.rlcBootloadByteOffset,
+                    p725Preflight.imuScratchByteOffset,
+                    p725Preflight.smuResponseByteOffset,
+                    p725PreInput.cpStat, p725PreInput.rlcBootloadStatus,
+                    p725PreInput.imuScratch0, p725PreInput.smuResponse,
+                    static_cast<uint32_t>(p725Preflight.pmfwAccepted),
+                    static_cast<uint32_t>(p725Preflight.smuMailboxReadable),
+                    static_cast<uint32_t>(p725Preflight.smuHandshakeVerified),
+                    static_cast<uint32_t>(p725Preflight.linuxFirmwareOrder),
+                    p718FenceExpected, p719FenceExpected, p720FenceExpected,
+                    p721FenceExpected, p722FenceExpected,
+                    p723FenceExpected, p724FenceExpected,
+                    static_cast<uint32_t>(p725Preflight.mayAutoload)
+                };
+                rnPublish(this, "navi33-p7-rlc-preflight",
+                    p725PreNames, p725PreValues,
+                    sizeof(p725PreValues) / sizeof(p725PreValues[0]));
+
                 const auto p725Gate =
                     rn_navi33::p725_rlc_autoload::inspect(p725Input);
 
@@ -9744,7 +9843,8 @@ bool RedNaviProbe::start(IOService *provider) {
                 uint32_t p725BootloadStatus = 0xffffffffu;
                 uint32_t p725ImuScratch0 = 0xffffffffu;
                 uint32_t p725BootPolls = 0u;
-                bool p725GcRegisterAddressesVerified = false;
+                bool p725GcRegisterAddressesVerified =
+                    p725Preflight.gcAddressesValid;
 #ifdef RN_ENABLE_NAVI33_RLC_AUTOLOAD_UNSAFE
                 if (p725Gate.mayAutoload &&
                     pspFence ==
@@ -9783,30 +9883,26 @@ bool RedNaviProbe::start(IOService *provider) {
                     // no golden register, GFXHUB, doorbell, CP or queue
                     // writes. Bound polling to 250 ms on an already
                     // PSP-acknowledged command; no busy indefinite loop.
-                    if (p725Accepted) {
-                        uint32_t gc0 = 0u, gc1 = 0u;
-                        p725GcRegisterAddressesVerified =
-                            ipBase(kRNHwIdGc, &gc0, 0) &&
-                            ipBase(kRNHwIdGc, &gc1, 1) &&
-                            gc0 != 0u && gc1 != 0u;
-                        if (p725GcRegisterAddressesVerified) {
-                            for (uint32_t sample = 0; sample < 250u;
-                                 ++sample) {
-                                p725CpStat = rd((gc0 + 0xf40u) * 4u);
-                                p725BootloadStatus =
-                                    rd((gc1 + 0x4e82u) * 4u);
-                                p725BootPolls = sample + 1u;
-                                if (rn_navi33::p725_rlc_autoload::
-                                    hardwareBootComplete(
-                                        p725CpStat, p725BootloadStatus)) {
-                                    p725BootComplete = true;
-                                    break;
-                                }
-                                IOSleep(1);
+                    if (p725Accepted && p725GcRegisterAddressesVerified) {
+                        // Reuse *prevalidated* BAR5 byte offsets, never
+                        // unchecked base + register arithmetic here.
+                        for (uint32_t sample = 0; sample < 250u;
+                             ++sample) {
+                            p725CpStat =
+                                rd(p725Preflight.cpStatByteOffset);
+                            p725BootloadStatus =
+                                rd(p725Preflight.rlcBootloadByteOffset);
+                            p725BootPolls = sample + 1u;
+                            if (rn_navi33::p725_rlc_autoload::
+                                hardwareBootComplete(
+                                    p725CpStat, p725BootloadStatus)) {
+                                p725BootComplete = true;
+                                break;
                             }
-                            p725ImuScratch0 =
-                                rd((gc1 + 0x4068u) * 4u);
+                            IOSleep(1);
                         }
+                        p725ImuScratch0 =
+                            rd(p725Preflight.imuScratchByteOffset);
                     }
                 } else if (p725Gate.mayAutoload) {
                     p725TransportError = 10u;
@@ -9892,7 +9988,8 @@ bool RedNaviProbe::start(IOService *provider) {
                 postInput.smuFirmwareLoaded = p73PmfwAccepted;
                 // SMU firmware in PSP TMR is NOT a verified SMU
                 // hardware-ready response. Never infer one from the other.
-                postInput.smuReady = false;
+                postInput.smuReady =
+                    p725Preflight.smuHandshakeVerified;
 
                 // A real GC/MES/queue plan must prove every prerequisite,
                 // including executable workload and writeback before

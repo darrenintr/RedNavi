@@ -320,6 +320,8 @@ test:
 	./build/navi33_p724_mes_kiq_data_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p725_rlc_autoload_test.cpp -o build/navi33_p725_rlc_autoload_test
 	./build/navi33_p725_rlc_autoload_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_rlc_readonly_preflight_test.cpp -o build/navi33_rlc_readonly_preflight_test
+	./build/navi33_rlc_readonly_preflight_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_gc_queue_bringup_test.cpp -o build/navi33_gc_queue_bringup_test
 	./build/navi33_gc_queue_bringup_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p7_pmfw_test.cpp -o build/navi33_p7_pmfw_test

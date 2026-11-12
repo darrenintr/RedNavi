@@ -39,6 +39,7 @@ enum class Error : uint8_t {
     PriorFenceMismatch,
     TransportUnhealthy,
     NoRuntimeOwner,
+    ReadOnlyPreflightIncomplete,
 };
 
 struct Input {
@@ -64,6 +65,8 @@ struct Input {
     uint32_t previousFenceObserved = 0;
     bool transportHealthy = false;
     bool runtimeOwnerRetained = false;
+    // Separately proven GC BAR, SMU handshake and Linux firmware order.
+    bool readOnlyPreflightPassed = false;
 };
 
 struct Report {
@@ -105,6 +108,9 @@ inline Report inspect(const Input &in) {
     }
     if (!in.runtimeOwnerRetained) {
         r.error = Error::NoRuntimeOwner; return r;
+    }
+    if (!in.readOnlyPreflightPassed) {
+        r.error = Error::ReadOnlyPreflightIncomplete; return r;
     }
     r.error = Error::Ok;
     r.mayAutoload = true;
