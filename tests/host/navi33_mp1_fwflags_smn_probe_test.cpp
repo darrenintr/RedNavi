@@ -20,7 +20,7 @@ static void rejects(Input i, Error error) {
     assert(r.error == error && !r.mayProbe);
 }
 int main() {
-    static_assert(kSmnMp1FirmwareFlags == 0x03b10024u, "Navi33 MP1 SMN");
+    static_assert(kSmnMp1FirmwareFlags == 0x03b10028u, "Navi33 MP1 SMN");
     static_assert(kInterruptsEnabledMask == 1u, "Linux MP1 bit0");
     auto r = inspect(ready());
     assert(r.mayProbe && r.error == Error::Ok);
