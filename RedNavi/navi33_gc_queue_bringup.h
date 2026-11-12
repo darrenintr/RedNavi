@@ -39,7 +39,8 @@ struct Input {
 
 struct Report {
     Error blocker = Error::RlcNotBooted;
-    bool mayCreateGraphicsQueue = false;
+    bool mayStartDiagnosticQueue = false;
+    bool mayExposeGraphicsQueue = false;
 };
 
 inline Report inspect(const Input &i) {
@@ -69,11 +70,14 @@ inline Report inspect(const Input &i) {
     if (!i.interruptOwnerVerified) {
         r.blocker = Error::NoInterruptOwner; return r;
     }
+    // Internal diagnostic queue is now eligible. It is NOT an exported
+    // system graphics queue until a real GPU-produced fence is observed.
+    r.mayStartDiagnosticQueue = true;
     if (!i.scratchGpuFenceCompleted) {
         r.blocker = Error::NoScratchGpuFence; return r;
     }
     r.blocker = Error::Ok;
-    r.mayCreateGraphicsQueue = true;
+    r.mayExposeGraphicsQueue = true;
     return r;
 }
 
