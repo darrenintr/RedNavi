@@ -131,6 +131,7 @@
 #include "navi33_mp1_fwflags_smn_probe.h"
 #include "navi33_smu_mailbox_admission.h"
 #include "navi33_smu_mailbox_roundtrip.h"
+#include "navi33_smu_provider_owner_audit.h"
 #include "navi33_gc_queue_bringup.h"
 #include "navi33_p713_stage_expand.h"
 #include "navi33_p7_pmfw.h"
@@ -10091,6 +10092,77 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-p7-smu-roundtrip",
                     p727Names, p727Values,
                     sizeof(p727Values) / sizeof(p727Values[0]));
+
+                // P7.28: read-only PCI provider ownership snapshot. A
+                // matching sibling (e.g. AMDSupport or Display_boot)
+                // is NOT proof that it has IOPCIDevice::open() ownership.
+                // Conversely, no open owner observed at this instant is
+                // NOT proof of exclusive SMU mailbox access. This audit
+                // never calls pci->open/close, never alters the PCI
+                // command register, and cannot admit P7.27 writes.
+                namespace p728 = rn_navi33::smu_provider_owner_audit;
+                p728::Input p728Input{};
+                p728Input.requested = p7StepArg >= 27u;
+                if (p728Input.requested) {
+                    p728Input.providerOpenByAny = pci->isOpen();
+                    p728Input.providerOpenByRedNavi = pci->isOpen(this);
+                    OSIterator *const childIterator =
+                        pci->getChildIterator(gIOServicePlane);
+                    if (childIterator) {
+                        p728Input.childSnapshotAvailable = true;
+                        for (OSObject *item = childIterator->getNextObject();
+                             item; item = childIterator->getNextObject()) {
+                            IORegistryEntry *child =
+                                OSDynamicCast(IORegistryEntry, item);
+                            if (!child) continue;
+                            ++p728Input.directChildrenObserved;
+                            const char *const name = child->getName();
+                            if (!name) continue;
+                            if (!strcmp(name, "AMDSupport"))
+                                p728Input.amdSupportSibling = true;
+                            if (!strcmp(name, ".Display_boot"))
+                                p728Input.bootFramebufferSibling = true;
+                        }
+                        childIterator->release();
+                    }
+                }
+                // No RedNavi-wide SMU transaction mutex or foreign
+                // writer exclusion is established by this audit.
+                const auto p728Owner = p728::inspect(p728Input);
+                const char *const p728Names[] = {
+                    "step", "requested", "provider_open_by_any",
+                    "provider_open_by_rednavi", "provider_state",
+                    "other_open_owner_observed", "own_open_observed",
+                    "child_snapshot_available", "direct_children_observed",
+                    "amd_support_sibling", "boot_framebuffer_sibling",
+                    "all_rednavi_senders_serialized",
+                    "foreign_mailbox_writer_excluded",
+                    "mailbox_exclusive_proven", "may_issue_smu_command"
+                };
+                const uint32_t p728Values[] = {
+                    p7StepArg, static_cast<uint32_t>(p728Input.requested),
+                    static_cast<uint32_t>(p728Input.providerOpenByAny),
+                    static_cast<uint32_t>(p728Input.providerOpenByRedNavi),
+                    static_cast<uint32_t>(p728Owner.providerState),
+                    static_cast<uint32_t>(p728Owner.otherOpenOwnerObserved),
+                    static_cast<uint32_t>(p728Owner.ownProviderOpenObserved),
+                    static_cast<uint32_t>(p728Input.childSnapshotAvailable),
+                    p728Input.directChildrenObserved,
+                    static_cast<uint32_t>(p728Input.amdSupportSibling),
+                    static_cast<uint32_t>(
+                        p728Input.bootFramebufferSibling),
+                    static_cast<uint32_t>(
+                        p728Input.allRedNaviSmcSendersSerialized),
+                    static_cast<uint32_t>(
+                        p728Input.foreignMailboxWriterExcluded),
+                    static_cast<uint32_t>(
+                        p728Owner.mailboxExclusiveProven),
+                    static_cast<uint32_t>(
+                        p728Owner.mayIssueSmuCommand)
+                };
+                rnPublish(this, "navi33-p7-mailbox-provider-audit",
+                    p728Names, p728Values,
+                    sizeof(p728Values) / sizeof(p728Values[0]));
 
                 const auto p725Gate =
                     rn_navi33::p725_rlc_autoload::inspect(p725Input);
