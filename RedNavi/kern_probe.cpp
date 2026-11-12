@@ -4307,6 +4307,14 @@ bool RedNaviProbe::start(IOService *provider) {
                 for (uint32_t i = 0; i < ips.dmu.count && i < RN_MAX_SEG; ++i)
                     gpu.reg_offset[RN_DCE_HWIP][0][i] = ips.dmu.dwords[i];
                 setProperty("navi33-ip-bases-ready", true);
+                // Passive NBIO_HWIP identity from NBIF_HWID (108);
+                // no register reads/writes or index selection here.
+                setProperty("navi33-nbio-major",
+                    static_cast<uint64_t>(check.nbio.major), 32);
+                setProperty("navi33-nbio-minor",
+                    static_cast<uint64_t>(check.nbio.minor), 32);
+                setProperty("navi33-nbio-revision",
+                    static_cast<uint64_t>(check.nbio.revision), 32);
 
                 // P5 reads Navi33 MMHUB 3.0.2 FB_LOCATION_BASE/TOP/OFFSET.
                 // Register offsets come from mmhub_3_0_2_offset.h, not MMHUB 3.0.0.
@@ -9845,6 +9853,13 @@ bool RedNaviProbe::start(IOService *provider) {
                     p724Input.observedGcMinor == 0u &&
                     p724Input.observedGcRevision == 2u;
                 p726Input.mp1Revision = p73HardwareMp1Revision;
+                // Discover NBIO_HWIP from NBIF_HWID 108; the PF1
+                // RSMU window is only valid for Linux nbio_v7_11.
+                // The PCI device ID and an in-BAR5 NBIF base are not
+                // enough to prove the index/data register layout.
+                p726Input.nbioMajor = check.nbio.major;
+                p726Input.nbioMinor = check.nbio.minor;
+                p726Input.nbioRevision = check.nbio.revision;
                 p726Input.pmfwAccepted = p73PmfwAccepted;
                 p726Input.priorFenceExpected = p724FenceExpected;
                 p726Input.priorFenceObserved = p724FenceObserved;
@@ -9889,6 +9904,8 @@ bool RedNaviProbe::start(IOService *provider) {
                     "step", "requested", "explicit_opt_in",
                     "gate_error", "may_probe",
                     "nbif_found", "nbif_base_dword",
+                    "nbio_major", "nbio_minor", "nbio_revision",
+                    "nbio_pf1_layout_supported",
                     "bar5_bytes", "smn_address",
                     "index_byte_offset", "data_byte_offset",
                     "index_before", "index_written", "index_after",
@@ -9905,6 +9922,13 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(p726Gate.mayProbe),
                     static_cast<uint32_t>(p726NbifPresent),
                     p726NbifBase,
+                    p726Input.nbioMajor, p726Input.nbioMinor,
+                    p726Input.nbioRevision,
+                    static_cast<uint32_t>(
+                        rn_navi33::mp1_fwflags_smn_probe::
+                            supportedPf1RsmuVersion(
+                                p726Input.nbioMajor, p726Input.nbioMinor,
+                                p726Input.nbioRevision)),
                     static_cast<uint32_t>(p726Input.bar5Bytes),
                     rn_navi33::mp1_fwflags_smn_probe::
                         kSmnMp1FirmwareFlags,
