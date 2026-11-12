@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
 // Opt-in Navi33 SMU 13.0.7 firmware-flags observational probe.
-// MP1_FIRMWARE_FLAGS is SMN address 0x03B10024, NOT MP1 BAR5 base+offset.
+// MP1_FIRMWARE_FLAGS is SMN address 0x03B10028, NOT MP1 BAR5 base+offset.
 // Reading requires one write to NBIF RSMU_IND_INDEX before reading
 // RSMU_IND_DATA. This policy checks boundaries and prerequisites only;
 // no SMN, GPU, SMU command or PCI writes occur in this header.
@@ -11,7 +11,7 @@
 
 namespace rn_navi33 { namespace mp1_fwflags_smn_probe {
 
-constexpr uint32_t kSmnMp1FirmwareFlags = 0x03b10024u;
+constexpr uint32_t kSmnMp1FirmwareFlags = 0x03b10028u;
 constexpr uint32_t kNbifIndexDword = 0u;
 constexpr uint32_t kNbifDataDword = 1u;
 constexpr uint32_t kInterruptsEnabledMask = 0x00000001u;
