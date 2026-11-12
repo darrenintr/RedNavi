@@ -9841,22 +9841,29 @@ bool RedNaviProbe::start(IOService *provider) {
                         "rednavi_navi33_p726_mp1_fwflags",
                         &p726OptInArg, sizeof(p726OptInArg)) &&
                     p726OptInArg == 1u;
+                uint32_t p726Pf0OptInArg = 0u;
+                const bool p726Pf0OptIn =
+                    PE_parse_boot_argn(
+                        "rednavi_navi33_p726_nbio43_pf0",
+                        &p726Pf0OptInArg, sizeof(p726Pf0OptInArg)) &&
+                    p726Pf0OptInArg == 1u;
                 uint32_t p726NbifBase = 0u;
                 const bool p726NbifPresent =
                     ipBase(108, &p726NbifBase, 1);
                 rn_navi33::mp1_fwflags_smn_probe::Input p726Input{};
                 p726Input.requested = p7StepArg >= 27u;
                 p726Input.explicitOptIn = p726OptIn;
+                p726Input.pf0ExplicitOptIn = p726Pf0OptIn;
                 p726Input.step = p7StepArg;
                 p726Input.exactNavi33 = p724Input.identityVerified &&
                     p724Input.observedGcMajor == 11u &&
                     p724Input.observedGcMinor == 0u &&
                     p724Input.observedGcRevision == 2u;
                 p726Input.mp1Revision = p73HardwareMp1Revision;
-                // Discover NBIO_HWIP from NBIF_HWID 108; the PF1
-                // RSMU window is only valid for Linux nbio_v7_11.
-                // The PCI device ID and an in-BAR5 NBIF base are not
-                // enough to prove the index/data register layout.
+                // Live 0.0.42 RX7600 IP Discovery reports NBIO 4.3.1,
+                // not 7.11. Linux nbio_v4_3_funcs maps PF0 RSMU
+                // index/data to NBIF segment 1 DWORD 0/1. Fail
+                // closed on another layout despite valid BAR5 bounds.
                 p726Input.nbioMajor = check.nbio.major;
                 p726Input.nbioMinor = check.nbio.minor;
                 p726Input.nbioRevision = check.nbio.revision;
@@ -9870,45 +9877,57 @@ bool RedNaviProbe::start(IOService *provider) {
                 p726Input.bar5Bytes = regs->getLength();
                 const auto p726Gate =
                     rn_navi33::mp1_fwflags_smn_probe::inspect(p726Input);
-                uint32_t p726IndexBefore = 0xffffffffu;
-                uint32_t p726IndexAfter = 0xffffffffu;
-                uint32_t p726FirmwareFlags = 0xffffffffu;
-                bool p726IndexWritten = false;
-                bool p726IndexRestored = false;
-                bool p726ValueValid = false;
+                rn_navi33::mp1_fwflags_smn_probe::Transcript p726Trace{};
                 if (p726Gate.mayProbe) {
-                    // If the original index is unreadable, refuse to
-                    // touch the index register; no safe restore is
-                    // possible. Otherwise select exactly one SMN
-                    // address, read data once, restore the original
-                    // index, and verify that restore.
-                    p726IndexBefore = rd(p726Gate.indexByteOffset);
-                    if (p726IndexBefore != 0xffffffffu) {
+                    // NBIF indirect index writes are shared state.
+                    // Always save the original and restore it, even
+                    // when the index selection readback mismatches.
+                    p726Trace.originalIndex =
+                        rd(p726Gate.indexByteOffset);
+                    if (p726Trace.originalIndex != 0xffffffffu) {
                         wr(p726Gate.indexByteOffset,
                             rn_navi33::mp1_fwflags_smn_probe::
                                 kSmnMp1FirmwareFlags);
-                        p726IndexWritten = true;
-                        p726FirmwareFlags =
-                            rd(p726Gate.dataByteOffset);
-                        wr(p726Gate.indexByteOffset,
-                            p726IndexBefore);
-                        p726IndexAfter =
+                        p726Trace.indexWritten = true;
+                        // Linux amdgpu_device_indirect_rreg does
+                        // readl(index) after writel(index) to flush
+                        // the posted write, BEFORE readl(data).
+                        p726Trace.selectedReadback =
                             rd(p726Gate.indexByteOffset);
-                        p726IndexRestored =
-                            p726IndexAfter == p726IndexBefore;
-                        p726ValueValid = p726IndexRestored &&
-                            p726FirmwareFlags != 0xffffffffu;
+                        if (p726Trace.selectedReadback ==
+                            rn_navi33::mp1_fwflags_smn_probe::
+                                kSmnMp1FirmwareFlags) {
+                            p726Trace.firmwareFlags =
+                                rd(p726Gate.dataByteOffset);
+                            p726Trace.dataRead = true;
+                        }
+                        wr(p726Gate.indexByteOffset,
+                            p726Trace.originalIndex);
+                        p726Trace.restoreWritten = true;
+                        p726Trace.restoredIndex =
+                            rd(p726Gate.indexByteOffset);
                     }
                 }
+                const bool p726IndexRestored =
+                    p726Trace.originalIndex != 0xffffffffu &&
+                    p726Trace.restoreWritten &&
+                    p726Trace.restoredIndex == p726Trace.originalIndex;
+                const bool p726ValueValid =
+                    rn_navi33::mp1_fwflags_smn_probe::
+                        validTranscript(p726Trace);
                 const char *const p726Names[] = {
                     "step", "requested", "explicit_opt_in",
-                    "gate_error", "may_probe",
+                    "pf0_explicit_opt_in", "gate_error", "may_probe",
                     "nbif_found", "nbif_base_dword",
                     "nbio_major", "nbio_minor", "nbio_revision",
+                    "nbio_pf0_layout_supported",
                     "nbio_pf1_layout_supported",
                     "bar5_bytes", "smn_address",
                     "index_byte_offset", "data_byte_offset",
-                    "index_before", "index_written", "index_after",
+                    "index_before", "index_written",
+                    "index_selected_readback",
+                    "index_selection_verified",
+                    "data_read", "restore_written", "index_after",
                     "index_restored", "fw_flags",
                     "snapshot_valid", "interrupts_enabled",
                     "smu_handshake_verified", "smu_command_sent",
@@ -9918,12 +9937,18 @@ bool RedNaviProbe::start(IOService *provider) {
                     p7StepArg, static_cast<uint32_t>(
                         p726Input.requested),
                     static_cast<uint32_t>(p726OptIn),
+                    static_cast<uint32_t>(p726Pf0OptIn),
                     static_cast<uint32_t>(p726Gate.error),
                     static_cast<uint32_t>(p726Gate.mayProbe),
                     static_cast<uint32_t>(p726NbifPresent),
                     p726NbifBase,
                     p726Input.nbioMajor, p726Input.nbioMinor,
                     p726Input.nbioRevision,
+                    static_cast<uint32_t>(
+                        rn_navi33::mp1_fwflags_smn_probe::
+                            supportedPf0RsmuVersion(
+                                p726Input.nbioMajor, p726Input.nbioMinor,
+                                p726Input.nbioRevision)),
                     static_cast<uint32_t>(
                         rn_navi33::mp1_fwflags_smn_probe::
                             supportedPf1RsmuVersion(
@@ -9933,14 +9958,23 @@ bool RedNaviProbe::start(IOService *provider) {
                     rn_navi33::mp1_fwflags_smn_probe::
                         kSmnMp1FirmwareFlags,
                     p726Gate.indexByteOffset, p726Gate.dataByteOffset,
-                    p726IndexBefore, static_cast<uint32_t>(
-                        p726IndexWritten), p726IndexAfter,
+                    p726Trace.originalIndex, static_cast<uint32_t>(
+                        p726Trace.indexWritten),
+                    p726Trace.selectedReadback,
+                    static_cast<uint32_t>(
+                        p726Trace.selectedReadback ==
+                        rn_navi33::mp1_fwflags_smn_probe::
+                            kSmnMp1FirmwareFlags &&
+                        p726Trace.indexWritten),
+                    static_cast<uint32_t>(p726Trace.dataRead),
+                    static_cast<uint32_t>(p726Trace.restoreWritten),
+                    p726Trace.restoredIndex,
                     static_cast<uint32_t>(p726IndexRestored),
-                    p726FirmwareFlags,
+                    p726Trace.firmwareFlags,
                     static_cast<uint32_t>(p726ValueValid),
                     static_cast<uint32_t>(
                         rn_navi33::mp1_fwflags_smn_probe::
-                            interruptsEnabled(p726FirmwareFlags,
+                            interruptsEnabled(p726Trace.firmwareFlags,
                                               p726ValueValid)),
                     0u, 0u, 0u
                 };
