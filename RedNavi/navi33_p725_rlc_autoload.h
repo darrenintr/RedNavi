@@ -112,7 +112,8 @@ inline Report inspect(const Input &in) {
 }
 
 inline bool hardwareBootComplete(uint32_t cpStat, uint32_t rlcStatus) {
-    return cpStat == 0u && (rlcStatus & kBootCompleteBit) != 0u;
+    return cpStat == 0u && rlcStatus != 0xffffffffu &&
+           (rlcStatus & kBootCompleteBit) != 0u;
 }
 
 }} // namespace rn_navi33::p725_rlc_autoload
