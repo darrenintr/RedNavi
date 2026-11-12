@@ -14,6 +14,7 @@ static Input ready() {
     i.mesKiqCodeAccepted = i.mesKiqDataAccepted = true;
     i.previousFenceExpected = i.previousFenceObserved = kPriorFence;
     i.transportHealthy = i.runtimeOwnerRetained = true;
+    i.readOnlyPreflightPassed = true;
     return i;
 }
 static void rejects(Input i, Error e) {
@@ -48,5 +49,6 @@ int main() {
     { auto i=ready(); i.previousFenceObserved=22; rejects(i,Error::PriorFenceMismatch); }
     { auto i=ready(); i.transportHealthy=false; rejects(i,Error::TransportUnhealthy); }
     { auto i=ready(); i.runtimeOwnerRetained=false; rejects(i,Error::NoRuntimeOwner); }
+    { auto i=ready(); i.readOnlyPreflightPassed=false; rejects(i,Error::ReadOnlyPreflightIncomplete); }
     return 0;
 }
