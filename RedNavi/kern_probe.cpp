@@ -9712,7 +9712,11 @@ bool RedNaviProbe::start(IOService *provider) {
                 p725Input.transportHealthy =
                     p724FenceOk && p724ResponseValid &&
                     p724TransportError == 0u && !p724Quarantined &&
-                    !p7SubmitTransportQuarantined;
+                    !p7SubmitTransportQuarantined &&
+                    // An already-acknowledged PSP fence can precede the
+                    // RPTR register update. For actual RLC execution
+                    // demand an idle ring at the prior snapshot.
+                    p724RptrFinal == p724WptrAfter;
                 p725Input.runtimeOwnerRetained =
                     navi33PspRuntimePrepared && navi33PspRuntimeBuf &&
                     navi33PspRuntimeBuf->getBytesNoCopy();
