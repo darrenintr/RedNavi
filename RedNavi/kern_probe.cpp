@@ -9877,37 +9877,19 @@ bool RedNaviProbe::start(IOService *provider) {
                 p726Input.bar5Bytes = regs->getLength();
                 const auto p726Gate =
                     rn_navi33::mp1_fwflags_smn_probe::inspect(p726Input);
-                rn_navi33::mp1_fwflags_smn_probe::Transcript p726Trace{};
-                if (p726Gate.mayProbe) {
-                    // NBIF indirect index writes are shared state.
-                    // Always save the original and restore it, even
-                    // when the index selection readback mismatches.
-                    p726Trace.originalIndex =
-                        rd(p726Gate.indexByteOffset);
-                    if (p726Trace.originalIndex != 0xffffffffu) {
-                        wr(p726Gate.indexByteOffset,
-                            rn_navi33::mp1_fwflags_smn_probe::
-                                kSmnMp1FirmwareFlags);
-                        p726Trace.indexWritten = true;
-                        // Linux amdgpu_device_indirect_rreg does
-                        // readl(index) after writel(index) to flush
-                        // the posted write, BEFORE readl(data).
-                        p726Trace.selectedReadback =
-                            rd(p726Gate.indexByteOffset);
-                        if (p726Trace.selectedReadback ==
-                            rn_navi33::mp1_fwflags_smn_probe::
-                                kSmnMp1FirmwareFlags) {
-                            p726Trace.firmwareFlags =
-                                rd(p726Gate.dataByteOffset);
-                            p726Trace.dataRead = true;
-                        }
-                        wr(p726Gate.indexByteOffset,
-                            p726Trace.originalIndex);
-                        p726Trace.restoreWritten = true;
-                        p726Trace.restoredIndex =
-                            rd(p726Gate.indexByteOffset);
-                    }
-                }
+                // Share gpu.mmio_idx_lock with compat rn_rreg32/rn_wreg32.
+                // Do not sleep or call indirect helpers inside this lock.
+                // Read-only by default: the helper refuses all MMIO unless
+                // BOTH explicit P7.26 boot-args pass the admission gate.
+                const auto p726Trace =
+                    rn_navi33::mp1_fwflags_smn_probe::sampleSerialized(
+                        p726Gate,
+                        [&]() { spin_lock(&gpu.mmio_idx_lock); },
+                        [&]() { spin_unlock(&gpu.mmio_idx_lock); },
+                        [&](uint32_t offset) { return rd(offset); },
+                        [&](uint32_t offset, uint32_t value) {
+                            wr(offset, value);
+                        });
                 const bool p726IndexRestored =
                     p726Trace.originalIndex != 0xffffffffu &&
                     p726Trace.restoreWritten &&
