@@ -54,6 +54,79 @@ int main() {
     { auto t=good; t.firmwareFlags=kInvalid; assert(!validTranscript(t)); }
     { auto t=good; t.restoreWritten=false; assert(!validTranscript(t)); }
     { auto t=good; t.restoredIndex=0u; assert(!validTranscript(t)); }
+    // Simulated BAR5 INDEX/DATA transaction. Every access and restore
+    // must occur while the caller's shared lock is held.
+    {
+        const Report gate = inspect(ready());
+        bool locked = false;
+        uint32_t index = 0x11223344u;
+        unsigned reads = 0, writes = 0, acquires = 0, releases = 0;
+        const auto acquire = [&]() { assert(!locked); locked = true; ++acquires; };
+        const auto release = [&]() { assert(locked); locked = false; ++releases; };
+        const auto read = [&](uint32_t offset) -> uint32_t {
+            assert(locked);
+            ++reads;
+            if (offset == gate.indexByteOffset) return index;
+            assert(offset == gate.dataByteOffset);
+            assert(index == kSmnMp1FirmwareFlags);
+            return 1u;
+        };
+        const auto write = [&](uint32_t offset, uint32_t value) {
+            assert(locked && offset == gate.indexByteOffset);
+            ++writes;
+            index = value;
+        };
+        const auto t = sampleSerialized(gate, acquire, release, read, write);
+        assert(!locked && acquires == 1 && releases == 1);
+        assert(reads == 4 && writes == 2);
+        assert(index == 0x11223344u && validTranscript(t));
+
+        // Gate closed: not even the lock or initial INDEX read is touched.
+        auto denied = gate;
+        denied.mayProbe = false;
+        const auto beforeReads = reads, beforeWrites = writes;
+        const auto noIo = sampleSerialized(denied, acquire, release, read, write);
+        assert(!validTranscript(noIo));
+        assert(acquires == 1 && releases == 1 &&
+               reads == beforeReads && writes == beforeWrites);
+    }
+    {
+        const Report gate = inspect(ready());
+        bool locked = false;
+        uint32_t index = 0xaabbccddu;
+        unsigned dataReads = 0;
+        const auto acquire = [&]() { assert(!locked); locked = true; };
+        const auto release = [&]() { assert(locked); locked = false; };
+        unsigned indexReads = 0;
+        const auto read = [&](uint32_t off) -> uint32_t {
+            assert(locked);
+            if (off == gate.dataByteOffset) { ++dataReads; return 1u; }
+            assert(off == gate.indexByteOffset);
+            ++indexReads;
+            if (indexReads == 2) return 0u; // selection mismatch
+            return index;
+        };
+        const auto write = [&](uint32_t off, uint32_t value) {
+            assert(locked && off == gate.indexByteOffset);
+            index = value;
+        };
+        const auto t = sampleSerialized(gate, acquire, release, read, write);
+        assert(!locked && !validTranscript(t) && dataReads == 0);
+        assert(t.restoreWritten && t.restoredIndex == t.originalIndex);
+        assert(index == 0xaabbccddu);
+    }
+    {
+        const Report gate = inspect(ready());
+        bool locked = false;
+        unsigned writes = 0;
+        const auto t = sampleSerialized(
+            gate,
+            [&]() { locked = true; },
+            [&]() { locked = false; },
+            [&](uint32_t) -> uint32_t { assert(locked); return kInvalid; },
+            [&](uint32_t, uint32_t) { ++writes; });
+        assert(!locked && writes == 0 && !validTranscript(t));
+    }
     auto r = inspect(ready());
     assert(r.mayProbe && r.error == Error::Ok);
     assert(r.indexByteOffset == 0x5000u*4u);
