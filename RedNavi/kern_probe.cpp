@@ -9907,7 +9907,7 @@ bool RedNaviProbe::start(IOService *provider) {
                     "mes_scheduler_running", "mes_kiq_running",
                     "queue_memory_owned", "doorbell_mapped",
                     "interrupts_owned", "scratch_gpu_fence_completed",
-                    "may_create_graphics_queue"
+                    "may_start_diagnostic_queue", "may_expose_graphics_queue"
                 };
                 const uint32_t gcQueueValues[] = {
                     p7StepArg,
@@ -9929,7 +9929,9 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(
                         gcQueueInput.scratchGpuFenceCompleted),
                     static_cast<uint32_t>(
-                        gcQueueGate.mayCreateGraphicsQueue)
+                        gcQueueGate.mayStartDiagnosticQueue),
+                    static_cast<uint32_t>(
+                        gcQueueGate.mayExposeGraphicsQueue)
                 };
                 rnPublish(this, "navi33-p7-gc-queue-preflight",
                           gcQueueNames, gcQueueValues,
