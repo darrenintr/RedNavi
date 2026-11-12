@@ -324,6 +324,8 @@ test:
 	./build/navi33_rlc_readonly_preflight_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_smu_mailbox_admission_test.cpp -o build/navi33_smu_mailbox_admission_test
 	./build/navi33_smu_mailbox_admission_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_mp1_fwflags_smn_probe_test.cpp -o build/navi33_mp1_fwflags_smn_probe_test
+	./build/navi33_mp1_fwflags_smn_probe_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_gc_queue_bringup_test.cpp -o build/navi33_gc_queue_bringup_test
 	./build/navi33_gc_queue_bringup_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p7_pmfw_test.cpp -o build/navi33_p7_pmfw_test
