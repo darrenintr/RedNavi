@@ -8,15 +8,16 @@ PSP Fence23/23 and GC/MP1 BAR5 read-only snapshot). The known-good
 
 Linux \`smu_v13_0_check_fw_status()\` reads the
 **SMN** (System Management Network) register
-\`MP1_Public | smnMP1_FIRMWARE_FLAGS = 0x03B10024\`, and checks
+\`MP1_Public | smnMP1_FIRMWARE_FLAGS = 0x03B10028\`, and checks
 \`MP1_FIRMWARE_FLAGS__INTERRUPTS_ENABLED_MASK = 0x00000001\`.
 
 This is **NOT** the MP1 C2PMSG mailbox BAR5 address and **not**
 a direct \`MP1 IP base + 0xBEE009\` BAR5 offset.
-Linux uses \`RREG32_PCIE\` for it. Existing RedNavi legacy
+Linux uses \`RREG32_PCIE\` for it. The generic SMU13 register address is `0x03B10024`, but the
+SMU 13.0.7 implementation uses `0x03B10028`. Existing RedNavi legacy
 \`RedNaviProbe::smuProbe()\` uses the discovered NBIF segment 1
 RSMU index/data pair (base + DWORD offsets 0/1) to select/read SMN
-\`0x03B10024\`.
+\`0x03B10028\`.
 
 **Important:** Although the firmware flags themselves are read,
 accessing SMN through this pair *writes to the indirect index register*.
@@ -44,7 +45,7 @@ touch NBIF index/data, and publishes its admission report.
 If permitted:
 1. Read the old NBIF index once, refuse the operation if unreadable
    (\`0xffffffff\`), so we do not lose its value.
-2. Write \`0x03B10024\` to the index **once**.
+2. Write \`0x03B10028\` to the index **once**.
 3. Read NBIF data **once**.
 4. Restore the old index **once**, read back and verify restoration.
 5. Publish raw bits. Interpret bit0 only if read/restore succeeded.
@@ -65,7 +66,7 @@ route without independent recovery EFI.
 
 - \`step\`, \`requested\`, \`explicit_opt_in\`, \`gate_error\`, \`may_probe\`
 - \`nbif_found\`, \`nbif_base_dword\`, \`bar5_bytes\`
-- \`smn_address\` (SMN byte address \`0x03B10024\`)
+- \`smn_address\` (SMN byte address \`0x03B10028\`)
 - \`index_byte_offset\`, \`data_byte_offset\`: MMIO BAR5 byte offsets
 - \`index_before\`, \`index_written\`, \`index_after\`, \`index_restored\`
 - \`fw_flags\`, \`snapshot_valid\`, \`interrupts_enabled\`
