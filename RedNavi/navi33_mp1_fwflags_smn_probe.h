@@ -21,6 +21,22 @@ constexpr uint32_t kInterruptsEnabledMask = 0x00000001u;
 constexpr uint32_t kInvalid = 0xffffffffu;
 constexpr uint32_t kPriorFence = 23u;
 
+// Short alternative boot-args for the strict two-key P7.26 opt-in.
+// Avoid appending two 30+ character strings to an almost full XNU
+// CommandLine buffer. Keep legacy spellings for existing experiments.
+constexpr const char kShortFwFlagsBootArg[] = "rn726fw";
+constexpr const char kShortPf0BootArg[] = "rn726pf0";
+
+// Require an explicit value of 1 and fail closed when a legacy and
+// short spelling conflict. No substring/prefix matching is allowed.
+inline bool optInFromEither(bool legacyPresent, uint32_t legacyValue,
+                            bool shortPresent, uint32_t shortValue) {
+    if (legacyPresent && legacyValue != 1u) return false;
+    if (shortPresent && shortValue != 1u) return false;
+    return legacyPresent || shortPresent;
+}
+
+
 enum class Error : uint8_t {
     Ok = 0,
     NotRequested,

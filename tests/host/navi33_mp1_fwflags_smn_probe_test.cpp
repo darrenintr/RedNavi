@@ -26,6 +26,29 @@ static void rejects(Input i, Error error) {
 }
 int main() {
     static_assert(kSmnMp1FirmwareFlags == 0x03b10028u, "Navi33 MP1 SMN");
+    static_assert(sizeof(kShortFwFlagsBootArg) <= 12u, "short FW flags");
+    static_assert(sizeof(kShortPf0BootArg) <= 12u, "short PF0");
+    assert(optInFromEither(false, 0u, true, 1u));
+    assert(optInFromEither(true, 1u, false, 0u));
+    assert(optInFromEither(true, 1u, true, 1u));
+    assert(!optInFromEither(false, 0u, false, 0u));
+    assert(!optInFromEither(false, 0u, true, 0u));
+    assert(!optInFromEither(false, 0u, true, 2u));
+    assert(!optInFromEither(true, 0u, true, 1u));
+    assert(!optInFromEither(true, 1u, true, 0u));
+    // Both opt-in categories are still mandatory for the PF0 gate.
+    {
+        Input i = ready();
+        i.explicitOptIn = optInFromEither(false, 0u, true, 1u);
+        i.pf0ExplicitOptIn = optInFromEither(false, 0u, true, 1u);
+        assert(inspect(i).mayProbe);
+        i.pf0ExplicitOptIn = optInFromEither(false, 0u, false, 0u);
+        assert(!inspect(i).mayProbe);
+        i.explicitOptIn = false;
+        i.pf0ExplicitOptIn = true;
+        assert(!inspect(i).mayProbe);
+    }
+
     static_assert(kInterruptsEnabledMask == 1u, "Linux MP1 bit0");
     // Linux nbio_v4_3_funcs is selected for NBIO 4.3.0 and 4.3.1.
     // Both use BIF_BX_PF0_RSMU_INDEX/DATA in NBIF segment 1.
