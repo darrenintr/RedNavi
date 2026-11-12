@@ -28,11 +28,17 @@
 // step 20: separately pinned RLC-G firmware PSP checkpoint (type 8); does NOT start RLC
 // step 21: pinned IMU instruction PSP checkpoint (type 68); IMU NOT started
 // step 22: pinned IMU data PSP checkpoint (type 69); IMU NOT started
+// step 23: pinned MES scheduler instruction (type 33); no MES execution
+// step 24: pinned MES scheduler stack (type 34); no MES execution
+// step 25: pinned MES KIQ instruction (type 81); no MES execution
+// step 26: pinned MES KIQ stack (type 82); no MES execution
+// step 27: compile-gated + boot-opted-in AUTOLOAD_RLC PSP command (0x21);
+ //       MUST validate CP_STAT and RLC_RLCS_BOOTLOAD_STATUS before queue work
 #include <stdint.h>
 
 namespace rn_navi33 { namespace p7_runtime {
 
-constexpr uint32_t kMaxExecutionStep = 22u;
+constexpr uint32_t kMaxExecutionStep = 27u;
 
 constexpr uint32_t sanitizeStep(uint32_t raw) {
     return raw <= kMaxExecutionStep ? raw : 0u;

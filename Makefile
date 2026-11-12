@@ -54,6 +54,13 @@ endif
 ifneq ($(wildcard RedNavi/navi33_gc_imu_fw.h),)
 CXXFLAGS += -DRN_HAVE_NAVI33_GC_IMU_FW
 endif
+ifneq ($(wildcard RedNavi/navi33_mes_fw.h),)
+CXXFLAGS += -DRN_HAVE_NAVI33_MES_FW
+endif
+# PSP AUTOLOAD_RLC can START RLC hardware: never build active by default.
+ifeq ($(NAVI33_RLC_AUTOLOAD_UNSAFE),1)
+CXXFLAGS += -DRN_ENABLE_NAVI33_RLC_AUTOLOAD_UNSAFE
+endif
 ifneq ($(wildcard RedNavi/gc_fw.h),)
 CXXFLAGS += -DRN_HAVE_GC_FW
 endif
@@ -303,6 +310,18 @@ test:
 	./build/navi33_p719_imu_i_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p720_imu_d_test.cpp -o build/navi33_p720_imu_d_test
 	./build/navi33_p720_imu_d_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p721_mes_sched_code_test.cpp -o build/navi33_p721_mes_sched_code_test
+	./build/navi33_p721_mes_sched_code_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p722_mes_sched_data_test.cpp -o build/navi33_p722_mes_sched_data_test
+	./build/navi33_p722_mes_sched_data_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p723_mes_kiq_code_test.cpp -o build/navi33_p723_mes_kiq_code_test
+	./build/navi33_p723_mes_kiq_code_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p724_mes_kiq_data_test.cpp -o build/navi33_p724_mes_kiq_data_test
+	./build/navi33_p724_mes_kiq_data_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p725_rlc_autoload_test.cpp -o build/navi33_p725_rlc_autoload_test
+	./build/navi33_p725_rlc_autoload_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_gc_queue_bringup_test.cpp -o build/navi33_gc_queue_bringup_test
+	./build/navi33_gc_queue_bringup_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p7_pmfw_test.cpp -o build/navi33_p7_pmfw_test
 	./build/navi33_p7_pmfw_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_linux_boot_parity_test.cpp -o build/navi33_linux_boot_parity_test
@@ -328,6 +347,7 @@ test:
 	python3 -m unittest discover -s tests/host -p 'navi33_gc_mec_firmware_generator_test.py'
 	python3 -m unittest discover -s tests/host -p 'navi33_gc_rlc_firmware_generator_test.py'
 	python3 -m unittest discover -s tests/host -p 'navi33_gc_imu_firmware_generator_test.py'
+	python3 -m unittest discover -s tests/host -p 'navi33_mes_firmware_generator_test.py'
 
 # Exercise optional firmware call sites without embedding or linking any firmware.
 # The declaration-only fixture is visible exclusively to this syntax check.
@@ -335,6 +355,11 @@ check-kernel-firmware:
 	$(CXX) $(CXXFLAGS) -DRN_HAVE_GC_FW -DRN_COMPILE_ONLY_FIRMWARE -Itests/compile -fsyntax-only RedNavi/kern_probe.cpp
 
 check-kernel-psp-firmware:
-	$(CXX) $(CXXFLAGS) -DRN_HAVE_PSP_FW -DRN_HAVE_SMU_FW -DRN_HAVE_NAVI33_SDMA_FW -DRN_HAVE_NAVI33_GC_PFP_FW -DRN_HAVE_NAVI33_GC_ME_FW -DRN_HAVE_NAVI33_GC_MEC_FW -DRN_HAVE_NAVI33_GC_RLC_FW -DRN_HAVE_NAVI33_GC_IMU_FW -Itests/compile -fsyntax-only RedNavi/kern_probe.cpp
+	$(CXX) $(CXXFLAGS) -DRN_HAVE_PSP_FW -DRN_HAVE_SMU_FW -DRN_HAVE_NAVI33_SDMA_FW -DRN_HAVE_NAVI33_GC_PFP_FW -DRN_HAVE_NAVI33_GC_ME_FW -DRN_HAVE_NAVI33_GC_MEC_FW -DRN_HAVE_NAVI33_GC_RLC_FW -DRN_HAVE_NAVI33_GC_IMU_FW -DRN_HAVE_NAVI33_MES_FW -Itests/compile -fsyntax-only RedNavi/kern_probe.cpp
 
-.PHONY: all clean test mtl diag navi33-p4 check-kernel-firmware check-kernel-psp-firmware
+# Force compilation of the dangerous opt-in path under a fake fixture;
+# no GPU hardware writes are performed by -fsyntax-only.
+check-kernel-rlc-autoload:
+	$(CXX) $(CXXFLAGS) -DRN_HAVE_NAVI33_MES_FW -DRN_ENABLE_NAVI33_RLC_AUTOLOAD_UNSAFE -Itests/compile -fsyntax-only RedNavi/kern_probe.cpp
+
+.PHONY: all clean test mtl diag navi33-p4 check-kernel-firmware check-kernel-psp-firmware check-kernel-rlc-autoload
