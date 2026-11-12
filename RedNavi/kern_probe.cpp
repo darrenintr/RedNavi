@@ -9836,17 +9836,36 @@ bool RedNaviProbe::start(IOService *provider) {
                 // does not enable autoload, and does not claim a live
                 // SMU command/response handshake.
                 uint32_t p726OptInArg = 0u;
-                const bool p726OptIn =
+                const bool p726OptInLongPresent =
                     PE_parse_boot_argn(
                         "rednavi_navi33_p726_mp1_fwflags",
-                        &p726OptInArg, sizeof(p726OptInArg)) &&
-                    p726OptInArg == 1u;
+                        &p726OptInArg, sizeof(p726OptInArg));
+                uint32_t p726OptInShortArg = 0u;
+                const bool p726OptInShortPresent =
+                    PE_parse_boot_argn(
+                        rn_navi33::mp1_fwflags_smn_probe::
+                            kShortFwFlagsBootArg,
+                        &p726OptInShortArg, sizeof(p726OptInShortArg));
+                const bool p726OptIn =
+                    rn_navi33::mp1_fwflags_smn_probe::optInFromEither(
+                        p726OptInLongPresent, p726OptInArg,
+                        p726OptInShortPresent, p726OptInShortArg);
+
                 uint32_t p726Pf0OptInArg = 0u;
-                const bool p726Pf0OptIn =
+                const bool p726Pf0LongPresent =
                     PE_parse_boot_argn(
                         "rednavi_navi33_p726_nbio43_pf0",
-                        &p726Pf0OptInArg, sizeof(p726Pf0OptInArg)) &&
-                    p726Pf0OptInArg == 1u;
+                        &p726Pf0OptInArg, sizeof(p726Pf0OptInArg));
+                uint32_t p726Pf0ShortArg = 0u;
+                const bool p726Pf0ShortPresent =
+                    PE_parse_boot_argn(
+                        rn_navi33::mp1_fwflags_smn_probe::
+                            kShortPf0BootArg,
+                        &p726Pf0ShortArg, sizeof(p726Pf0ShortArg));
+                const bool p726Pf0OptIn =
+                    rn_navi33::mp1_fwflags_smn_probe::optInFromEither(
+                        p726Pf0LongPresent, p726Pf0OptInArg,
+                        p726Pf0ShortPresent, p726Pf0ShortArg);
                 uint32_t p726NbifBase = 0u;
                 const bool p726NbifPresent =
                     ipBase(108, &p726NbifBase, 1);
