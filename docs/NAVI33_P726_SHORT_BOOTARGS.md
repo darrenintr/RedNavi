@@ -15,8 +15,12 @@ After appending two long P7.26 arguments, the user observed:
   the working and nonworking boots; it is not proven causal.
 
 The complete configured line was **1014 ASCII bytes**; removing the two
-P7.26 long flags leaves **947 bytes**. This strongly motivates an
-A/B length test, but DOES NOT yet prove a specific length-handling bug.
+P7.26 long flags leaves **947 bytes**. A/B recovery on 2026-11-12 at ~21:14: after removing the two long flags
+and rebooting the unchanged 0.0.44 Kext, `sysctl kern.bootargs` returned
+the full existing string and `ioreg -c RedNaviProbe` reported
+`navi33-nbio-major=4` again. This strongly supports a boot-argument
+length/forwarding issue, but does not yet identify which layer or buffer
+caused the failure.
 Some XNU boot-argument structures have a 1024-byte command line buffer;
 1014 bytes alone is not mathematically greater than 1024.
 
@@ -43,14 +47,14 @@ spellings for one category are set, a conflict (e.g. one value 0) is
 rejected. No prefix/substring shortcut.
 
 Using two short flags instead of the two old flags reduces the reported
-line from 1014 to **967 bytes**. **Replace**, do not append to, the two
+line from 1014 to approximately **968 bytes**. **Replace**, do not append to, the two
 long flags. The 0.0.44 Kext does not understand these new flags.
 
 ## Test plan / failure containment
 
-1. First restore the previous default-off 0.0.44 boot args (without P7.26
-   flags) and boot; ensure `sysctl kern.bootargs` and `RedNaviProbe`
-   reappear. This A/B test is needed before claiming an overflow.
+1. **Done on 2026-11-12:** restored default-off 0.0.44 boot args; both
+   `sysctl kern.bootargs` and `RedNaviProbe` reappeared. This is an
+   A/B correlation, not proof of the precise underlying overflow.
 2. Build and host-test 0.0.45 on this feature branch.
 3. Keep a known-good USB and an independent bootable rescue EFI.
 4. Test 0.0.45 with *no P7.26 opt-ins* first: no index write, no RLC.
