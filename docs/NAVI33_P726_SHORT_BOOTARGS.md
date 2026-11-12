@@ -50,6 +50,49 @@ Using two short flags instead of the two old flags reduces the reported
 line from 1014 to approximately **968 bytes**. **Replace**, do not append to, the two
 long flags. The 0.0.44 Kext does not understand these new flags.
 
+## 0.0.45 RX7600 hardware verification (2026-11-12 ~21:29)
+
+The user rebuilt 0.0.45 and verified a **default-off** boot first:
+`kern.bootargs` nonempty, Kext `0.0.45` loaded,
+`RedNaviProbe` registered, NBIO 4.3.1, PF0 support = 1,
+`gate_error=2`, `index_written=0`, `snapshot_valid=0`.
+
+With only the two SHORT P7.26 arguments added to the formerly valid
+boot-args, the first opt-in real-hardware run **succeeded**:
+
+| `navi33-p7-mp1-fwflags` property | observed |
+| --- | --- |
+| Kext version | 0.0.45 |
+| `gate_error`, `may_probe` | 0, 1 |
+| `explicit_opt_in`, `pf0_explicit_opt_in` | 1, 1 |
+| `nbio_major.minor.revision` | 4.3.1 |
+| `index_byte_offset`, `data_byte_offset` | 80 (`0x50`), 84 (`0x54`) |
+| `index_before`, `index_after` | 0, 0 |
+| `index_written`, `index_selection_verified` | 1, 1 |
+| `index_selected_readback` | 61931560 (`0x03b10028`) |
+| `data_read`, `restore_written`, `index_restored` | 1, 1, 1 |
+| `snapshot_valid` | 1 |
+| `fw_flags` | 1 (`0x00000001`) |
+| `interrupts_enabled` | 1 |
+| `smu_handshake_verified`, `smu_command_sent` | 0, 0 |
+| `rlc_autoload_submitted` | 0 |
+
+This is direct evidence that this RX7600's NBIO4.3 PF0 indirect INDEX/DATA
+read/restore transaction worked in this boot and returned an SMU firmware
+interrupts-enabled flag (bit0). It is *not* proof of a mailbox
+command/response handshake or stable behavior across all boots.
+
+The separate `navi33-p7-rlc-preflight` still reported
+`smu_response_readback=1`, `smu_handshake_verified=0`,
+`firmware_order_matches_linux=0`, `blocker=6`, `may_autoload=0`.
+A stale/idle response value `1` is not a reply to a newly submitted
+GetSmuVersion command. No RLC engine start or Metal is claimed.
+
+Next independent prerequisites: enforce a *real* MP1 mailbox
+ownership/lease contract before any opt-in active GetSmuVersion
+transaction; separately correct and verify the PSP firmware load ordering
+to match Linux before considering autoload. Keep all gates fail-closed.
+
 ## Test plan / failure containment
 
 1. **Done on 2026-11-12:** restored default-off 0.0.44 boot args; both
