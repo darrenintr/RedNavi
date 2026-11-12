@@ -26,6 +26,11 @@ struct RuntimeBases {
 struct RuntimeReport {
     RuntimeError error = RuntimeError::Truncated;
     Identity observed{};
+    // Linux's NBIO_HWIP maps to NBIF_HWID (108) in IP Discovery.
+    // This version is deliberately recorded independently from the six
+    // required compute identities; it must match a supported RSMU layout
+    // before any NBIF indirect index write is authorized.
+    IpVersion nbio{};
     RuntimeBases bases{};
     uint16_t binaryMajor = 0, binaryMinor = 0;
     uint16_t tableVersion = 0;
@@ -164,6 +169,10 @@ inline RuntimeReport inspectRuntimeDiscovery(uint16_t vendor, uint16_t device,
                         selected->dwords[segment] = readLe32(b, baseAt);
                     }
                     selected->count = nbase;
+                    if (hwId == 108u) {
+                        out.nbio = {b[pos + 4], b[pos + 5],
+                                    b[pos + 6]};
+                    }
                 }
                 for (unsigned k = 0; k < 6; ++k) {
                     if (hwId != hardwareIds[k]) continue;
