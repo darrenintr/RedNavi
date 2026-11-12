@@ -127,6 +127,7 @@
 #include "navi33_p723_mes_kiq_code.h"
 #include "navi33_p724_mes_kiq_data.h"
 #include "navi33_p725_rlc_autoload.h"
+#include "navi33_gc_queue_bringup.h"
 #include "navi33_p713_stage_expand.h"
 #include "navi33_p7_pmfw.h"
 #include "navi33_p6_psp_boot_plan.h"
@@ -9873,6 +9874,66 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-p7-rlc-autoload-runtime",
                           p725Names, p725Values,
                           sizeof(p725Values) / sizeof(p725Values[0]));
+
+                // Do not confuse PSP firmware acceptance with started GC
+                // and running MES. These facts ONLY affect diagnostics.
+                postInput.gcFirmwareLoaded =
+                    p725Input.pfpMeMecAccepted &&
+                    p718Accepted && p719Accepted && p720Accepted &&
+                    p721Accepted && p722Accepted &&
+                    p723Accepted && p724Accepted;
+                postInput.mesSchedulerLoaded =
+                    p721Accepted && p722Accepted;
+                postInput.mesKiqLoaded = p723Accepted && p724Accepted;
+                postInput.smuFirmwareLoaded = p73PmfwAccepted;
+                // SMU firmware in PSP TMR is NOT a verified SMU
+                // hardware-ready response. Never infer one from the other.
+                postInput.smuReady = false;
+
+                // A real GC/MES/queue plan must prove every prerequisite,
+                // including executable workload and writeback before
+                // user queue API becomes available. No writes here.
+                rn_navi33::gc_queue_bringup::Input gcQueueInput{};
+                gcQueueInput.rlcBootComplete = p725BootComplete;
+                // The remaining hardware conditions are not yet proven
+                // on real Navi33. Fail CLOSED even if AUTOLOAD_RLC
+                // PSP accepted and RLC bootload bit became set.
+                const auto gcQueueGate =
+                    rn_navi33::gc_queue_bringup::inspect(gcQueueInput);
+                const char *const gcQueueNames[] = {
+                    "step", "blocker", "rlc_bootload_complete",
+                    "gfxhub_initialized", "rs64_configured",
+                    "gc_registers_initialized",
+                    "mes_scheduler_running", "mes_kiq_running",
+                    "queue_memory_owned", "doorbell_mapped",
+                    "interrupts_owned", "scratch_gpu_fence_completed",
+                    "may_create_graphics_queue"
+                };
+                const uint32_t gcQueueValues[] = {
+                    p7StepArg,
+                    static_cast<uint32_t>(gcQueueGate.blocker),
+                    static_cast<uint32_t>(gcQueueInput.rlcBootComplete),
+                    static_cast<uint32_t>(
+                        gcQueueInput.gfxHubInitialized),
+                    static_cast<uint32_t>(gcQueueInput.rs64Configured),
+                    static_cast<uint32_t>(
+                        gcQueueInput.gcRegistersInitialized),
+                    static_cast<uint32_t>(
+                        gcQueueInput.mesSchedulerRunning),
+                    static_cast<uint32_t>(gcQueueInput.mesKiqRunning),
+                    static_cast<uint32_t>(
+                        gcQueueInput.queueMemoryOwnerVerified),
+                    static_cast<uint32_t>(gcQueueInput.doorbellMapped),
+                    static_cast<uint32_t>(
+                        gcQueueInput.interruptOwnerVerified),
+                    static_cast<uint32_t>(
+                        gcQueueInput.scratchGpuFenceCompleted),
+                    static_cast<uint32_t>(
+                        gcQueueGate.mayCreateGraphicsQueue)
+                };
+                rnPublish(this, "navi33-p7-gc-queue-preflight",
+                          gcQueueNames, gcQueueValues,
+                          sizeof(gcQueueValues) / sizeof(gcQueueValues[0]));
 
                 // Dedicated preflight telemetry makes it possible to
                 // prove mapping expansion separately from PSP command.
