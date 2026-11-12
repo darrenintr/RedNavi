@@ -52,6 +52,8 @@ int main() {
         auto p = inspectRuntimeDiscovery(0x1002, 0x7480, b.data(), b.size());
         assert(p.error == RuntimeError::Ok && p.eligibleForComputeBringup());
         assert(p.blocksFound == 6 && matches(p.observed));
+        assert(p.nbio.major == 0u && p.nbio.minor == 0u &&
+               p.nbio.revision == 0u);
         assert(inspectRuntimeDiscovery(0x1002, 0x747e, b.data(), b.size()).error == RuntimeError::NotNavi33);
         assert(inspectRuntimeDiscovery(0x1002, 0x7480, b.data(), 10).error == RuntimeError::Truncated);
         b[400] ^= 1;
