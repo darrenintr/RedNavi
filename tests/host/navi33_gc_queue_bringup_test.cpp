@@ -5,7 +5,7 @@ using namespace rn_navi33::gc_queue_bringup;
 int main() {
     Input i{};
     auto a = inspect(i);
-    assert(!a.mayCreateGraphicsQueue && a.blocker == Error::RlcNotBooted);
+    assert(!a.mayExposeGraphicsQueue && a.blocker == Error::RlcNotBooted);
     i.rlcBootComplete = true;
     assert(inspect(i).blocker == Error::GfxHubNotInitialized);
     i.gfxHubInitialized = true;
@@ -24,9 +24,12 @@ int main() {
     assert(inspect(i).blocker == Error::NoInterruptOwner);
     i.interruptOwnerVerified = true;
     assert(inspect(i).blocker == Error::NoScratchGpuFence);
+    assert(inspect(i).mayStartDiagnosticQueue);
+    assert(!inspect(i).mayExposeGraphicsQueue);
     i.scratchGpuFenceCompleted = true;
-    assert(inspect(i).mayCreateGraphicsQueue);
+    assert(inspect(i).mayExposeGraphicsQueue);
     i.mesKiqRunning = false;
-    assert(!inspect(i).mayCreateGraphicsQueue);
+    assert(!inspect(i).mayStartDiagnosticQueue);
+    assert(!inspect(i).mayExposeGraphicsQueue);
     return 0;
 }
