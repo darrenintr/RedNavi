@@ -29,3 +29,6 @@ RedNavi/navi33_gc_rlc_fw.h
 
 # Generated binary-derived IMU vendor firmware: never commit.
 RedNavi/navi33_gc_imu_fw.h
+
+# Locally generated pinned MES firmware (proprietary vendor bytes).
+RedNavi/navi33_mes_fw.h
