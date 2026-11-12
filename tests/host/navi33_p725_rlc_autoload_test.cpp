@@ -26,6 +26,7 @@ int main() {
     assert(hardwareBootComplete(0u, 0x80000000u));
     assert(!hardwareBootComplete(1u, 0x80000000u));
     assert(!hardwareBootComplete(0u, 0x7fffffffu));
+    assert(!hardwareBootComplete(0u, 0xffffffffu));
     assert(!hardwareBootComplete(0xffffffffu, 0xffffffffu));
     assert(inspect(ready()).mayAutoload);
     { auto i=ready(); i.requested=false; rejects(i,Error::Disabled); }
