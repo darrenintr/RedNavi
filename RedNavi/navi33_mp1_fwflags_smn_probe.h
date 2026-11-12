@@ -119,6 +119,40 @@ inline bool validTranscript(const Transcript &t) {
         t.restoredIndex == t.originalIndex;
 }
 
+// The entire INDEX/DATA/restore transaction must share the device's
+// indirect-register lock with rn_rreg32/rn_wreg32. Callers provide the
+// same lock; this header stays usable by pure host tests. No sleeping,
+// waiting, or nested indirect-register access inside these callbacks.
+// A driver-local lock cannot serialize firmware or another PCI function.
+template <typename Acquire, typename Release, typename Read, typename Write>
+inline Transcript sampleSerialized(const Report &gate, Acquire acquire,
+                                   Release release, Read read, Write write) {
+    Transcript t{};
+    if (!gate.mayProbe || gate.error != Error::Ok ||
+        gate.indexByteOffset == kInvalid ||
+        gate.dataByteOffset == kInvalid ||
+        gate.indexByteOffset == gate.dataByteOffset) return t;
+
+    acquire();
+    t.originalIndex = read(gate.indexByteOffset);
+    if (t.originalIndex != kInvalid) {
+        write(gate.indexByteOffset, kSmnMp1FirmwareFlags);
+        t.indexWritten = true;
+        // Flush posted MMIO index write before reading indirect data.
+        t.selectedReadback = read(gate.indexByteOffset);
+        if (t.selectedReadback == kSmnMp1FirmwareFlags) {
+            t.firmwareFlags = read(gate.dataByteOffset);
+            t.dataRead = true;
+        }
+        // Restore even if selection failed; verify under the same lock.
+        write(gate.indexByteOffset, t.originalIndex);
+        t.restoreWritten = true;
+        t.restoredIndex = read(gate.indexByteOffset);
+    }
+    release();
+    return t;
+}
+
 inline Report inspect(const Input &in) {
     Report r{};
     if (!in.requested) return r;
