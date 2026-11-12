@@ -28,6 +28,9 @@ jobs:
       - name: Compile PSP firmware-enabled P7/P7.1 path (declaration-only fixture)
         run: |
           if [ "${{ matrix.config }}" = "Debug" ]; then make DEBUG=1 check-kernel-psp-firmware; else make check-kernel-psp-firmware; fi
+      - name: Compile actual AUTOLOAD_RLC unsafe-gated code path (syntax only, never load)
+        run: |
+          if [ "${{ matrix.config }}" = "Debug" ]; then make DEBUG=1 check-kernel-rlc-autoload; else make check-kernel-rlc-autoload; fi
       - name: Host tests (compat layer)
         if: matrix.config == 'Release'
         run: make test
