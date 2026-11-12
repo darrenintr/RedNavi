@@ -126,6 +126,7 @@
 #include "navi33_p722_mes_sched_data.h"
 #include "navi33_p723_mes_kiq_code.h"
 #include "navi33_p724_mes_kiq_data.h"
+#include "navi33_p725_rlc_autoload.h"
 #include "navi33_p713_stage_expand.h"
 #include "navi33_p7_pmfw.h"
 #include "navi33_p6_psp_boot_plan.h"
@@ -9671,6 +9672,208 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-p7-mes-kiq-data-runtime",
                           p724Names, p724Values,
                           sizeof(p724Values) / sizeof(p724Values[0]));
+                // P7.25: the first command capable of starting the
+                // RLC/IMU engines, NOT a firmware-fence-only checkpoint.
+                // Explicit firmware and ring prerequisites; actual PSP
+                // hardware command additionally requires a compile-time
+                // unsafe gate and a separately consented boot argument.
+                uint32_t p725OptInRaw = 0u;
+                const bool p725OptIn =
+                    PE_parse_boot_argn(
+                        "rednavi_navi33_p725_rlc_autoload",
+                        &p725OptInRaw, sizeof(p725OptInRaw)) &&
+                    p725OptInRaw == 1u;
+                rn_navi33::p725_rlc_autoload::Input p725Input{};
+                p725Input.requested = p7StepArg >= 27u;
+                p725Input.explicitOptIn = p725OptIn;
+                p725Input.asicVerified = p724Input.identityVerified;
+                p725Input.gcMajor = p724Input.observedGcMajor;
+                p725Input.gcMinor = p724Input.observedGcMinor;
+                p725Input.gcRevision = p724Input.observedGcRevision;
+                p725Input.pspRingReady = p724Input.pspRingReady;
+                p725Input.tmrAccepted = p74Accepted;
+                p725Input.pmfwAccepted = p73PmfwAccepted;
+                p725Input.sdmaBothAccepted = p75Accepted && p76Accepted;
+                p725Input.pfpMeMecAccepted =
+                    p77Accepted && p78Accepted && p79Accepted &&
+                    p710Accepted && p711Accepted && p712Accepted &&
+                    p713Accepted && p714Accepted && p715Accepted &&
+                    p716Accepted && p717Accepted;
+                p725Input.rlcGAccepted = p718Accepted;
+                p725Input.imuIAccepted = p719Accepted;
+                p725Input.imuDAccepted = p720Accepted;
+                p725Input.mesSchedulerCodeAccepted = p721Accepted;
+                p725Input.mesSchedulerDataAccepted = p722Accepted;
+                p725Input.mesKiqCodeAccepted = p723Accepted;
+                p725Input.mesKiqDataAccepted = p724Accepted;
+                p725Input.previousFenceExpected = p724FenceExpected;
+                p725Input.previousFenceObserved = p724FenceObserved;
+                p725Input.transportHealthy =
+                    p724FenceOk && p724ResponseValid &&
+                    p724TransportError == 0u && !p724Quarantined &&
+                    !p7SubmitTransportQuarantined;
+                p725Input.runtimeOwnerRetained =
+                    navi33PspRuntimePrepared && navi33PspRuntimeBuf &&
+                    navi33PspRuntimeBuf->getBytesNoCopy();
+                const auto p725Gate =
+                    rn_navi33::p725_rlc_autoload::inspect(p725Input);
+
+                uint32_t p725Compiled = 0u;
+#ifdef RN_ENABLE_NAVI33_RLC_AUTOLOAD_UNSAFE
+                p725Compiled = 1u;
+#endif
+                bool p725FenceOk = false;
+                bool p725Submitted = false;
+                bool p725ResponseValid = false;
+                bool p725Accepted = false;
+                bool p725BootComplete = false;
+                uint32_t p725Status = 0xffffffffu;
+                uint32_t p725TransportError = 0u;
+                bool p725Quarantined = p7SubmitTransportQuarantined;
+                uint32_t p725WptrBefore = 0u, p725WptrAfter = 0u;
+                uint32_t p725RptrBefore = 0u, p725RptrAfterKick = 0u;
+                uint32_t p725RptrFinal = 0u;
+                uint32_t p725FenceBefore = 0u, p725FenceExpected = 0u;
+                uint32_t p725FenceObserved = 0u, p725FencePolls = 0u;
+                uint32_t p725CpStat = 0xffffffffu;
+                uint32_t p725BootloadStatus = 0xffffffffu;
+                uint32_t p725ImuScratch0 = 0xffffffffu;
+                uint32_t p725BootPolls = 0u;
+                bool p725GcRegisterAddressesVerified = false;
+#ifdef RN_ENABLE_NAVI33_RLC_AUTOLOAD_UNSAFE
+                if (p725Gate.mayAutoload &&
+                    pspFence ==
+                        rn_navi33::p725_rlc_autoload::kPriorFence &&
+                    !p7SubmitTransportQuarantined) {
+                    // Linux psp_rlc_autoload_start(): empty input payload,
+                    // GFX_CMD_ID_AUTOLOAD_RLC = 0x21. PSP fence 24 is a
+                    // command acknowledgement; NEVER call it "RLC ready".
+                    uint32_t resp[1] = {0xffffffffu};
+                    p725FenceOk = pspSubmitP7(
+                        p71RingGpuVa, p71CmdGpuVa, p71FenceGpuVa,
+                        rn_navi33::p725_rlc_autoload::kCommandId,
+                        nullptr, 0u, resp, 1u);
+                    p725Submitted = p7SubmitWasIssued;
+                    p725ResponseValid = p7SubmitResponseValid;
+                    p725TransportError = p7SubmitTransportError;
+                    p725Quarantined = p7SubmitTransportQuarantined;
+                    p725WptrBefore = p7SubmitWptrBefore;
+                    p725WptrAfter = p7SubmitWptrAfter;
+                    p725RptrBefore = p7SubmitRptrBefore;
+                    p725RptrAfterKick = p7SubmitRptrAfterKick;
+                    p725RptrFinal = p7SubmitRptrFinal;
+                    p725FenceBefore = p7SubmitFenceBefore;
+                    p725FenceExpected = p7SubmitFenceExpected;
+                    p725FenceObserved = p7SubmitFenceObserved;
+                    p725FencePolls = p7SubmitPolls;
+                    if (p725ResponseValid)
+                        p725Status = resp[0];
+                    p725Accepted = p725FenceOk && p725ResponseValid &&
+                        p725Status == 0u &&
+                        p725FenceExpected ==
+                            rn_navi33::p725_rlc_autoload::kExpectedFence &&
+                        p725FenceObserved ==
+                            rn_navi33::p725_rlc_autoload::kExpectedFence;
+                    // Read-only Linux GC11 boot-complete verification;
+                    // no golden register, GFXHUB, doorbell, CP or queue
+                    // writes. Bound polling to 250 ms on an already
+                    // PSP-acknowledged command; no busy indefinite loop.
+                    if (p725Accepted) {
+                        uint32_t gc0 = 0u, gc1 = 0u;
+                        p725GcRegisterAddressesVerified =
+                            ipBase(kRNHwIdGc, &gc0, 0) &&
+                            ipBase(kRNHwIdGc, &gc1, 1) &&
+                            gc0 != 0u && gc1 != 0u;
+                        if (p725GcRegisterAddressesVerified) {
+                            for (uint32_t sample = 0; sample < 250u;
+                                 ++sample) {
+                                p725CpStat = rd((gc0 + 0xf40u) * 4u);
+                                p725BootloadStatus =
+                                    rd((gc1 + 0x4e82u) * 4u);
+                                p725BootPolls = sample + 1u;
+                                if (rn_navi33::p725_rlc_autoload::
+                                    hardwareBootComplete(
+                                        p725CpStat, p725BootloadStatus)) {
+                                    p725BootComplete = true;
+                                    break;
+                                }
+                                IOSleep(1);
+                            }
+                            p725ImuScratch0 =
+                                rd((gc1 + 0x4068u) * 4u);
+                        }
+                    }
+                } else if (p725Gate.mayAutoload) {
+                    p725TransportError = 10u;
+                }
+#endif
+
+                const char *const p725Names[] = {
+                    "step", "gate_error", "requested", "explicit_opt_in",
+                    "unsafe_build_enabled", "may_autoload",
+                    "psp_ready", "tmr_accepted", "pmfw_accepted",
+                    "sdma_both_accepted", "pfp_me_mec_accepted",
+                    "rlc_g_accepted", "imu_i_accepted", "imu_d_accepted",
+                    "mes_scheduler_code_accepted",
+                    "mes_scheduler_data_accepted",
+                    "mes_kiq_code_accepted", "mes_kiq_data_accepted",
+                    "command_id", "prior_fence_expected",
+                    "prior_fence_observed", "submitted", "response_valid",
+                    "fence_ok", "fence_before", "fence_expected",
+                    "fence_observed", "fence_polls", "status",
+                    "submit_wptr_before", "submit_wptr_after",
+                    "submit_rptr_before", "submit_rptr_after_kick",
+                    "submit_rptr_final", "transport_error",
+                    "transport_quarantined", "autoload_psp_accepted",
+                    "gc_register_addresses_verified", "cp_stat",
+                    "bootload_status", "imu_scratch0", "boot_polls",
+                    "rlc_bootload_complete", "gc_engine_started",
+                    "graphics_queue_started"
+                };
+                const uint32_t p725Values[] = {
+                    p7StepArg, static_cast<uint32_t>(p725Gate.error),
+                    static_cast<uint32_t>(p725Input.requested),
+                    static_cast<uint32_t>(p725Input.explicitOptIn),
+                    p725Compiled,
+                    static_cast<uint32_t>(p725Gate.mayAutoload),
+                    static_cast<uint32_t>(p725Input.pspRingReady),
+                    static_cast<uint32_t>(p725Input.tmrAccepted),
+                    static_cast<uint32_t>(p725Input.pmfwAccepted),
+                    static_cast<uint32_t>(p725Input.sdmaBothAccepted),
+                    static_cast<uint32_t>(p725Input.pfpMeMecAccepted),
+                    static_cast<uint32_t>(p725Input.rlcGAccepted),
+                    static_cast<uint32_t>(p725Input.imuIAccepted),
+                    static_cast<uint32_t>(p725Input.imuDAccepted),
+                    static_cast<uint32_t>(
+                        p725Input.mesSchedulerCodeAccepted),
+                    static_cast<uint32_t>(
+                        p725Input.mesSchedulerDataAccepted),
+                    static_cast<uint32_t>(p725Input.mesKiqCodeAccepted),
+                    static_cast<uint32_t>(p725Input.mesKiqDataAccepted),
+                    rn_navi33::p725_rlc_autoload::kCommandId,
+                    p725Input.previousFenceExpected,
+                    p725Input.previousFenceObserved,
+                    static_cast<uint32_t>(p725Submitted),
+                    static_cast<uint32_t>(p725ResponseValid),
+                    static_cast<uint32_t>(p725FenceOk),
+                    p725FenceBefore, p725FenceExpected,
+                    p725FenceObserved, p725FencePolls, p725Status,
+                    p725WptrBefore, p725WptrAfter,
+                    p725RptrBefore, p725RptrAfterKick, p725RptrFinal,
+                    p725TransportError, static_cast<uint32_t>(
+                        p725Quarantined),
+                    static_cast<uint32_t>(p725Accepted),
+                    static_cast<uint32_t>(
+                        p725GcRegisterAddressesVerified),
+                    p725CpStat, p725BootloadStatus, p725ImuScratch0,
+                    p725BootPolls,
+                    static_cast<uint32_t>(p725BootComplete),
+                    0u, 0u
+                };
+                rnPublish(this, "navi33-p7-rlc-autoload-runtime",
+                          p725Names, p725Values,
+                          sizeof(p725Values) / sizeof(p725Values[0]));
+
                 // Dedicated preflight telemetry makes it possible to
                 // prove mapping expansion separately from PSP command.
                 const char *const p713StageNames[] = {
