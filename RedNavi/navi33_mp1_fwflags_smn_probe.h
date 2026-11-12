@@ -4,8 +4,10 @@
 //
 // Opt-in Navi33 SMU 13.0.7 firmware-flags observational probe.
 // MP1_FIRMWARE_FLAGS is SMN address 0x03B10028, NOT MP1 BAR5 base+offset.
-// Reading requires one write to NBIF RSMU_IND_INDEX before reading
-// RSMU_IND_DATA. This policy checks boundaries and prerequisites only;
+// Linux NBIO 4.3.1 maps PF0 RSMU INDEX/DATA to NBIF segment 1
+// DWORD offsets 0 and 1. A read requires one index MMIO write;
+// the index write must be posted/flushed by a readback before data.
+// This policy checks boundaries and prerequisites only;
 // no SMN, GPU, SMU command or PCI writes occur in this header.
 #include <stdint.h>
 
@@ -14,6 +16,7 @@ namespace rn_navi33 { namespace mp1_fwflags_smn_probe {
 constexpr uint32_t kSmnMp1FirmwareFlags = 0x03b10028u;
 constexpr uint32_t kNbifIndexDword = 0u;
 constexpr uint32_t kNbifDataDword = 1u;
+constexpr uint32_t kNbifIndexHiDword = 2u; // 32-bit SMN path leaves HI alone.
 constexpr uint32_t kInterruptsEnabledMask = 0x00000001u;
 constexpr uint32_t kInvalid = 0xffffffffu;
 constexpr uint32_t kPriorFence = 23u;
@@ -31,10 +34,14 @@ enum class Error : uint8_t {
     TransportUnhealthy,
     MissingNbif,
     InvalidNbifWindow,
+    MissingPf0OptIn, // append: preserve existing IORegistry numeric errors
 };
 struct Input {
     bool requested = false;
     bool explicitOptIn = false;
+    // Second explicit opt-in for the verified NBIO4.3 PF0 path.
+    // Prevents an old 0.0.42 flag from silently enabling writes on update.
+    bool pf0ExplicitOptIn = false;
     uint32_t step = 0;
     bool exactNavi33 = false;
     uint32_t mp1Revision = 0;
@@ -74,14 +81,42 @@ inline bool checkedNbifOffsets(uint32_t baseDword, uint64_t bar5Bytes,
     return true;
 }
 
-// Linux amdgpu_discovery.c assigns NBIO v7.11.0..v7.11.3 to
-// nbio_v7_11_funcs. Its PF1 RSMU_INDEX / RSMU_DATA registers are
-// DWORD 0/1 relative to NBIF segment 1 (not segment 0). All other
-// versions fail CLOSED, including v7.11.4+ (different Linux funcs)
-// and v7.7.x (PF0, not PF1).
+// Linux amdgpu_discovery.c selects nbio_v4_3_funcs for v4.3.0/1.
+// nbio_v4_3.c uses regBIF_BX_PF0_RSMU_INDEX/DATA. The generated
+// nbio_4_3_0_offset.h assigns those register DWORDs 0/1 to NBIF
+// segment base index 1. RX7600 0.0.42 observed NBIO 4.3.1.
+inline bool supportedPf0RsmuVersion(uint32_t major, uint32_t minor,
+                                   uint32_t revision) {
+    return major == 4u && minor == 3u && revision <= 1u;
+}
+
+// Legacy PF1 diagnostic only: Linux 7.11.0..3 has an index/data
+// pair at similar offsets, but it is NOT enabled for Navi33 0.0.43.
 inline bool supportedPf1RsmuVersion(uint32_t major, uint32_t minor,
                                    uint32_t revision) {
     return major == 7u && minor == 11u && revision <= 3u;
+}
+
+struct Transcript {
+    uint32_t originalIndex = kInvalid;
+    uint32_t selectedReadback = kInvalid;
+    uint32_t firmwareFlags = kInvalid;
+    uint32_t restoredIndex = kInvalid;
+    bool indexWritten = false;
+    bool dataRead = false;
+    bool restoreWritten = false;
+};
+
+// Linux amdgpu_device_indirect_rreg() always readl(index) after the
+// index writel and before readl(data). Reject snapshots missing this
+// verified selection or a verified restore of the original index.
+inline bool validTranscript(const Transcript &t) {
+    return t.originalIndex != kInvalid &&
+        t.indexWritten &&
+        t.selectedReadback == kSmnMp1FirmwareFlags &&
+        t.dataRead && t.firmwareFlags != kInvalid &&
+        t.restoreWritten &&
+        t.restoredIndex == t.originalIndex;
 }
 
 inline Report inspect(const Input &in) {
@@ -91,7 +126,7 @@ inline Report inspect(const Input &in) {
     if (in.step != 27u) { r.error = Error::WrongStep; return r; }
     if (!in.exactNavi33) { r.error = Error::WrongAsic; return r; }
     if (in.mp1Revision != 7u) { r.error = Error::WrongMp1Revision; return r; }
-    if (!supportedPf1RsmuVersion(in.nbioMajor, in.nbioMinor,
+    if (!supportedPf0RsmuVersion(in.nbioMajor, in.nbioMinor,
                                  in.nbioRevision)) {
         r.error = Error::UnsupportedNbioVersion; return r;
     }
@@ -101,6 +136,7 @@ inline Report inspect(const Input &in) {
         r.error = Error::PriorFenceMismatch; return r;
     }
     if (!in.transportHealthy) { r.error = Error::TransportUnhealthy; return r; }
+    if (!in.pf0ExplicitOptIn) { r.error = Error::MissingPf0OptIn; return r; }
     if (!in.nbifBaseFound) { r.error = Error::MissingNbif; return r; }
     if (!checkedNbifOffsets(in.nbifBaseDword, in.bar5Bytes,
                             &r.indexByteOffset, &r.dataByteOffset)) {
