@@ -74,10 +74,17 @@ int main() {
         assert(r.bases.gc.count == 4 && r.bases.gc.dwords[3] == 0x2402c00u);
         assert(r.bases.mmhub.count == 2 && r.bases.mmhub.dwords[1] == 0x2408800u);
         assert(r.bases.nbif.count == 6 && r.bases.nbif.dwords[5] == 0x4040000u);
+        // NBIO version must come from real IP Discovery entry 108;
+        // do not infer v7.11 purely because this base is 0x14.
+        assert(r.nbio.major == 4u && r.nbio.minor == 0u &&
+               r.nbio.revision == 0u);
         b = makeDiscovery(v2, false);
         const auto missingOptional = inspectRuntimeDiscovery(0x1002, 0x7480, b.data(), b.size());
         assert(missingOptional.error == RuntimeError::Ok);
         assert(!hasComputeRegisterBases(missingOptional));
+        assert(missingOptional.nbio.major == 0u &&
+               missingOptional.nbio.minor == 0u &&
+               missingOptional.nbio.revision == 0u);
     }
 
     // Physical RX7600 P4 (2026-11-09): MMHUB 3.0.0 offsets returned
