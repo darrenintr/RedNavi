@@ -55,7 +55,16 @@ struct rn_device {
     // Sleepable lock shared by the legacy SMU13 sender and Navi33 P7.27.
     // This is host-driver serialization only, NOT a firmware mailbox lease.
     struct mutex smu_msg_lock;
+    // Legacy smuProbe historically creates a temporary rn_device for
+    // the *same* physical BAR5. It must not lock a separate mutex.
+    // Null means use the per-device lock initialized by rn_device_init.
+    struct mutex *smu_msg_lock_override;
 };
+
+static inline struct mutex *rn_smu_message_mutex(struct rn_device *adev) {
+    return adev->smu_msg_lock_override ?
+        adev->smu_msg_lock_override : &adev->smu_msg_lock;
+}
 
 #ifdef __cplusplus
 extern "C" {

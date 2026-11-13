@@ -388,6 +388,9 @@ class RedNaviProbe : public IOService {
     bool p7SubmitResponseValid {false};
     bool p7SubmitTransportQuarantined {false};
     uint32_t p7SubmitTransportError {0};
+    // P7.30: persistent for the lifetime of THIS RedNaviProbe service.
+    // Access while holding gpu.smu_msg_lock. Never reinitialize in start().
+    rn_navi33::smu_mailbox_roundtrip::SessionState p730SmuSession {};
     // P6.5 software-only VRAM reservation. These offsets are bookkeeping
     // claims only; P4 never writes them or exposes them to the GPU.
     bool navi33VramLedgerOwned {false};
@@ -1453,6 +1456,9 @@ void RedNaviProbe::smuProbe(const char *property, bool send) {
     struct rn_device dev;
     struct rn_device *adev = &dev;       // the RREG32 macros expect a pointer called adev
     rn_device_init(adev, "RedNavi SMU", reinterpret_cast<volatile void *>(regs->getVirtualAddress()), regs->getLength());
+    // This alias shares the physical MP1 mailbox with gpu. Separate
+    // rn_device instances must NOT create distinct locking domains.
+    adev->smu_msg_lock_override = &gpu.smu_msg_lock;
     adev->reg_offset[RN_MP1_HWIP][0][0] = mp1;
 
     OSDictionary *out = OSDictionary::withCapacity(12);
@@ -1502,9 +1508,9 @@ void RedNaviProbe::smuProbe(const char *property, bool send) {
             // Legacy Navi32-only diagnostic response recovery must use
             // the same host-side mailbox mutex. Still NOT a genuine SMU
             // response; no such recovery exists in the Navi33 P7 path.
-            mutex_lock(&gpu.smu_msg_lock);
+            mutex_lock(rn_smu_message_mutex(adev));
             WREG32_SOC15(RN_MP1, 0, mmMP1_SMN_C2PMSG_90, 1);
-            mutex_unlock(&gpu.smu_msg_lock);
+            mutex_unlock(rn_smu_message_mutex(adev));
         }
     }
     rnPublishOne(out, "c2pmsg_90_after", RREG32_SOC15(RN_MP1, 0, mmMP1_SMN_C2PMSG_90));
@@ -10039,7 +10045,9 @@ bool RedNaviProbe::start(IOService *provider) {
                     p725PreInput.smuMailboxRead
                     ? p725PreInput.smuResponse : p727a::kInvalid;
                 const auto p727Admission = p727a::inspect(p727Input);
-                bool p727OneShotConsumed = false;
+                // Session state belongs to the RedNaviProbe object. It is
+                // retained across invocations; a partial transaction cannot
+                // be retried inside one service lifetime.
                 // Serialize even the admission-only path against any
                 // cooperating legacy SMU sender on this rn_device. This
                 // does not change p727MailboxLeaseHeld=false or allow MMIO
@@ -10047,12 +10055,13 @@ bool RedNaviProbe::start(IOService *provider) {
                 mutex_lock(&gpu.smu_msg_lock);
                 const auto p727Roundtrip = p727r::execute(
                     p727Admission, p727Registers, p727MailboxLeaseHeld,
-                    p727OneShotConsumed,
+                    p730SmuSession,
                     [&](uint32_t offset) { return rd(offset); },
                     [&](uint32_t offset, uint32_t value) {
                         wr(offset, value);
                     },
-                    [&]() { IODelay(p727r::kPauseMicroseconds); });
+                    [&]() { IODelay(p727r::kPauseMicroseconds); },
+                    []() { return rn_now_ns(); });
                 mutex_unlock(&gpu.smu_msg_lock);
                 const char *const p727Names[] = {
                     "step", "requested", "explicit_opt_in",
@@ -10197,6 +10206,40 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-p7-smu-host-serializer",
                     p729Names, p729Values,
                     sizeof(p729Values) / sizeof(p729Values[0]));
+
+                // P7.30 reports only software safeguards. This is not
+                // external GPU/firmware mailbox ownership evidence.
+                const uint64_t p730ElapsedNs =
+                    p727Roundtrip.elapsedNanoseconds;
+                const char *const p730Names[] = {
+                    "step", "session_scope_service_instance",
+                    "session_consumed", "session_quarantined",
+                    "session_verified", "deadline_ns_lo", "deadline_ns_hi",
+                    "elapsed_ns_lo", "elapsed_ns_hi", "monotonic_checks",
+                    "deadline_expired", "clock_regressed",
+                    "legacy_alias_shared_mutex",
+                    "unreviewed_external_writers_remain",
+                    "live_smu_command_enabled"
+                };
+                const uint32_t p730Values[] = {
+                    p7StepArg, 1u,
+                    static_cast<uint32_t>(p730SmuSession.consumed),
+                    static_cast<uint32_t>(p730SmuSession.quarantined),
+                    static_cast<uint32_t>(p730SmuSession.verified),
+                    static_cast<uint32_t>(
+                        p727r::kDeadlineNanoseconds & 0xffffffffull),
+                    static_cast<uint32_t>(
+                        p727r::kDeadlineNanoseconds >> 32),
+                    static_cast<uint32_t>(p730ElapsedNs & 0xffffffffull),
+                    static_cast<uint32_t>(p730ElapsedNs >> 32),
+                    p727Roundtrip.monotonicChecks,
+                    static_cast<uint32_t>(p727Roundtrip.deadlineExpired),
+                    static_cast<uint32_t>(p727Roundtrip.clockRegressed),
+                    1u, 1u, 0u
+                };
+                rnPublish(this, "navi33-p7-smu-transaction-guard",
+                    p730Names, p730Values,
+                    sizeof(p730Values) / sizeof(p730Values[0]));
 
                 const auto p725Gate =
                     rn_navi33::p725_rlc_autoload::inspect(p725Input);

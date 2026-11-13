@@ -71,6 +71,14 @@ int main() {
     rn_device d{};
     mutex_init(&d.smu_msg_lock);
     d.reg_offset[RN_MP1_HWIP][0][0] = kBase;
+    // A second software rn_device can target the same BAR5 (legacy
+    // smuProbe does exactly this). Both MUST use one host mutex.
+    rn_device legacy{};
+    mutex_init(&legacy.smu_msg_lock);
+    legacy.reg_offset[RN_MP1_HWIP][0][0] = kBase;
+    legacy.smu_msg_lock_override = &d.smu_msg_lock;
+    assert(rn_smu_message_mutex(&legacy) == &d.smu_msg_lock);
+    assert(rn_smu_message_mutex(&d) == &d.smu_msg_lock);
     std::atomic<bool> go{false};
     int rc1 = -1, rc2 = -1;
     u32 version1 = 0, version2 = 0, resp1 = 0, resp2 = 0;
@@ -83,7 +91,7 @@ int main() {
     std::thread second([&]() {
         while (!go.load(std::memory_order_acquire))
             std::this_thread::yield();
-        rc2 = rn_smu13_send(&d, PPSMC_MSG_GetSmuVersion, 0,
+        rc2 = rn_smu13_send(&legacy, PPSMC_MSG_GetSmuVersion, 0,
                             &version2, &resp2, 500000);
     });
     go.store(true, std::memory_order_release);
