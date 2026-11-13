@@ -48,6 +48,21 @@ class SmuMailboxWriterAudit(unittest.TestCase):
         self.assertIn("mutex_unlock(rn_smu_message_mutex(adev));", kern)
         self.assertIn("struct mutex *smu_msg_lock_override;", helper)
 
+    def test_image_coordinator_wraps_all_reviewed_sender_paths(self):
+        kern = self.read("RedNavi/kern_probe.cpp")
+        sender = self.read("RedNavi/smu13.cpp")
+        self.assertIn("static DEFINE_MUTEX(gSmuHostCoordinator);", sender)
+        self.assertLess(sender.index("ScopedSmuMessageLock imageGuard(rn_smu_host_coordinator());"),
+                        sender.index("ScopedSmuMessageLock guard(rn_smu_message_mutex(adev));"))
+        self.assertIn("mutex_lock(rn_smu_host_coordinator());\n"
+                      "                mutex_lock(&gpu.smu_msg_lock);", kern)
+        self.assertIn("mutex_unlock(&gpu.smu_msg_lock);\n"
+                      "                mutex_unlock(rn_smu_host_coordinator());", kern)
+        self.assertIn("mutex_lock(rn_smu_host_coordinator());\n"
+                      "            mutex_lock(rn_smu_message_mutex(adev));", kern)
+        self.assertIn("mutex_unlock(rn_smu_message_mutex(adev));\n"
+                      "            mutex_unlock(rn_smu_host_coordinator());", kern)
+
     def test_one_shot_is_not_stack_local_and_live_submit_stays_blocked(self):
         kern = self.read("RedNavi/kern_probe.cpp")
         self.assertIn("SessionState p730SmuSession {};", kern)

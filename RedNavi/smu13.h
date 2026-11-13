@@ -43,6 +43,10 @@
 extern "C" {
 #endif
 
+// One lock per loaded RedNavi Kext image, shared across cooperating SMU
+// callers and service instances. Not a hardware mailbox lease.
+struct mutex *rn_smu_host_coordinator(void);
+
 // Sends one message and waits for the answer. Returns 0 and the answer argument in *out, or a negative errno:
 // -ETIMEDOUT (no answer, or the previous message never completed, nothing was sent in that case),
 // -EREMOTEIO (SMU failed the message), -EOPNOTSUPP (unknown command), -EBUSY / -EAGAIN (rejected).
