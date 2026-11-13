@@ -4509,7 +4509,7 @@ bool RedNaviProbe::start(IOService *provider) {
         if (p736ResponseSampler.armed)
             IOLog("RedNavi: P7.36 explicitly armed for at most two "
                   "late C2PMSG_90 direct reads per Kext image; "
-                  "NO SMU commands, NO mailbox ownership grant\\n");
+                  "NO SMU commands, NO mailbox ownership grant\n");
         if (check.eligibleForComputeBringup()) {
             // Explicitly select the gfx1102 M4 flavor without using the
             // Navi32 firmware, GART, MES or queue start path.
