@@ -2,11 +2,13 @@
 #define REDNAVI_NAVI33_SMU_MAILBOX_ROUNDTRIP_H
 // SPDX-License-Identifier: BSD-3-Clause
 //
-// One-shot Navi33 MP1 13.0.7 GetSmuVersion mailbox transport.
-// Hardware access is supplied by the caller. The default P4 build must
-// never enable the unsafe kernel call site. Host-only tests use fake MMIO.
-// A PCI provider open arbitrates host clients, but it cannot prove that
-// firmware or another PCI function never touches the SMU mailbox.
+// P7.30: bounded, one-shot Navi33 MP1 13.0.7 GetSmuVersion transport.
+// Pure C++ testable algorithm; the kernel caller supplies checked BAR5 MMIO,
+// a monotonic nanosecond clock and an exclusive cooperating host mutex.
+//
+// This is NOT a hardware ownership grant. The real Navi33 caller must keep
+// p727MailboxLeaseHeld=false until external ownership is reviewed.
+// No PSP/RLC/MES/graphics engine commands are issued here.
 #include <stdint.h>
 #include "navi33_smu_mailbox_admission.h"
 
@@ -14,6 +16,7 @@ namespace rn_navi33 { namespace smu_mailbox_roundtrip {
 
 namespace admission = rn_navi33::smu_mailbox_admission;
 constexpr uint32_t kPauseMicroseconds = 25u;
+constexpr uint64_t kDeadlineNanoseconds = 50000000ull; // 50 ms monotonic budget
 
 struct RegisterPlan {
     bool valid = false;
@@ -55,6 +58,18 @@ enum class Error : uint8_t {
     TimedOut,
     FirmwareRejected,
     InvalidVersion,
+    Quarantined,
+    DeadlineExpired,
+    ClockRegressed,
+};
+
+// One session is retained by the RedNaviProbe instance rather than
+// re-created on every call. The caller serializes access to this state
+// with gpu.smu_msg_lock; a failed attempt is NEVER made eligible again.
+struct SessionState {
+    bool consumed = false;
+    bool quarantined = false;
+    bool verified = false;
 };
 
 struct Result {
@@ -64,87 +79,140 @@ struct Result {
     bool responseClearWritten = false;
     bool parameterClearWritten = false;
     bool verified = false;
+    bool deadlineExpired = false;
+    bool clockRegressed = false;
+    uint32_t monotonicChecks = 0u;
+    uint64_t elapsedNanoseconds = 0ull;
     uint32_t responseBefore = admission::kInvalid;
     uint32_t responseAfterClear = admission::kInvalid;
     uint32_t parameterAfterClear = admission::kInvalid;
     admission::Transcript transcript{};
 };
 
-// The caller must have exclusive host-IOPCIDevice access for this entire
-// function. Once attempted, do not retry, including after BUSY or timeout.
-// A response already equal to 1 cannot count as a fresh handshake: it
-// must be cleared, observed as zero, and transition after message 0x02.
-// Writes are never made unless admission, BAR5, and host lease all pass.
-// read/write use verified BAR5 byte offsets. pause is a bounded delay.
-template <typename Read, typename Write, typename Pause>
+// The caller MUST hold the common host SMU mutex for the complete
+// transaction. hostLeaseHeld must be independently proven, never inferred
+// from an idle response or IOPCIDevice::isOpen snapshot.
+//
+// The monotonic deadline covers response clearing, argument clearing,
+// message write, response wait, and version read. The poll count is an
+// additional fail-safe (avoids spinning if a supplied clock stalls).
+// Rejected admission performs zero MMIO operations and consumes no attempt.
+// Once MMIO observation starts, *any* inconsistency quarantines the session.
+//
+// nowNs returns a monotonically increasing 64-bit nanosecond count.
+// read/write use validated BAR5 byte offsets. pause is a bounded delay.
+template <typename Read, typename Write, typename Pause, typename Now>
 inline Result execute(const admission::Report &gate,
-                      const RegisterPlan &reg,
-                      bool hostLeaseHeld, bool &oneShotConsumed,
-                      Read read, Write write, Pause pause) {
+                      const RegisterPlan &reg, bool hostLeaseHeld,
+                      SessionState &state, Read read, Write write,
+                      Pause pause, Now nowNs) {
     Result r{};
     if (!gate.maySubmit || !hostLeaseHeld) return r;
     if (!reg.valid) { r.error = Error::InvalidAddress; return r; }
-    if (oneShotConsumed) { r.error = Error::AlreadyAttempted; return r; }
-    oneShotConsumed = true;
+    if (state.quarantined) { r.error = Error::Quarantined; return r; }
+    if (state.consumed) { r.error = Error::AlreadyAttempted; return r; }
+
+    // Consume before the first MMIO observation; retries after partial
+    // progress may misinterpret a delayed firmware response as a new one.
+    state.consumed = true;
     r.attempted = true;
     auto &t = r.transcript;
     t.ownedByThisDriver = true;
 
-    // Recheck under the owner's lease; an earlier snapshot may be stale.
-    r.responseBefore = read(reg.responseByteOffset);
-    if (r.responseBefore != admission::kResponseOk) {
-        r.error = Error::ResponseChangedBeforeSubmit;
+    auto fail = [&](Error error) {
+        r.error = error;
         r.quarantineLease = true;
+        state.quarantined = true;
+    };
+    const uint64_t startedNs = nowNs();
+    uint64_t lastNs = startedNs;
+    auto deadlineReached = [&]() -> bool {
+        const uint64_t currentNs = nowNs();
+        ++r.monotonicChecks;
+        if (currentNs < lastNs) {
+            r.clockRegressed = true;
+            fail(Error::ClockRegressed);
+            return true;
+        }
+        lastNs = currentNs;
+        r.elapsedNanoseconds = currentNs - startedNs;
+        if (r.elapsedNanoseconds >= kDeadlineNanoseconds) {
+            r.deadlineExpired = true;
+            t.timedOut = true;
+            fail(Error::DeadlineExpired);
+            return true;
+        }
+        return false;
+    };
+
+    if (deadlineReached()) return r;
+    r.responseBefore = read(reg.responseByteOffset);
+    if (deadlineReached()) return r;
+    if (r.responseBefore != admission::kResponseOk) {
+        fail(Error::ResponseChangedBeforeSubmit);
         return r;
     }
+
     write(reg.responseByteOffset, 0u);
     r.responseClearWritten = true;
+    if (deadlineReached()) return r;
     r.responseAfterClear = read(reg.responseByteOffset);
+    if (deadlineReached()) return r;
     if (r.responseAfterClear != 0u) {
-        r.error = Error::ClearNotObserved;
-        r.quarantineLease = true;
+        fail(Error::ClearNotObserved);
         return r;
     }
     t.responseClearedToZeroObserved = true;
 
     write(reg.parameterByteOffset, 0u);
     r.parameterClearWritten = true;
+    if (deadlineReached()) return r;
     r.parameterAfterClear = read(reg.parameterByteOffset);
+    if (deadlineReached()) return r;
     if (r.parameterAfterClear != 0u) {
-        r.error = Error::ParameterClearNotObserved;
-        r.quarantineLease = true;
+        fail(Error::ParameterClearNotObserved);
         return r;
     }
 
+    // A deadline check immediately before the irreversible command write.
+    if (deadlineReached()) return r;
     write(reg.messageByteOffset, admission::kGetSmuVersionMessage);
     t.commandSubmitted = true;
     t.commandId = admission::kGetSmuVersionMessage;
+
     for (uint32_t i = 0u; i < admission::kMaxResponsePolls; ++i) {
+        if (deadlineReached()) return r;
         const uint32_t response = read(reg.responseByteOffset);
         t.polls = i + 1u;
+        if (deadlineReached()) return r;
         if (response != 0u) {
             t.responseTransitionObserved = true;
             t.responseAfter = response;
             break;
         }
-        pause();
+        if (i + 1u < admission::kMaxResponsePolls) pause();
     }
     if (!t.responseTransitionObserved) {
         t.timedOut = true;
-        r.error = Error::TimedOut;
-        r.quarantineLease = true;
+        fail(Error::TimedOut);
         return r;
     }
     if (t.responseAfter != admission::kResponseOk) {
-        r.error = Error::FirmwareRejected;
-        r.quarantineLease = true;
+        fail(Error::FirmwareRejected);
         return r;
     }
+
+    if (deadlineReached()) return r;
     t.versionResult = read(reg.parameterByteOffset);
     t.argumentRead = true;
+    if (deadlineReached()) return r;
     r.verified = admission::verifiedVersionHandshake(t);
-    r.error = r.verified ? Error::Ok : Error::InvalidVersion;
-    r.quarantineLease = !r.verified;
+    if (!r.verified) {
+        fail(Error::InvalidVersion);
+        return r;
+    }
+    r.error = Error::Ok;
+    state.verified = true;
     return r;
 }
 
