@@ -11,9 +11,9 @@ audit = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(audit)
 
 
-def record(kind, sample, **data):
+def record(kind, sample_index, **data):
     return (
-        f'"navi33-p7-mp1-{kind}-sample-{sample}" = ' +
+        f'"navi33-p7-mp1-{kind}-sample-{sample_index}" = ' +
         "{" + ",".join(f'"{k}"={v}' for k, v in data.items()) + "}\n"
     )
 
