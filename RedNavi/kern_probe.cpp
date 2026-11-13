@@ -139,6 +139,7 @@
 static rn_navi33::smu_lifetime_latch::AttemptLatch
     gNavi33SmuKextImageAttemptClaim{};
 #include "navi33_smu_provider_owner_audit.h"
+#include "navi33_late_provider_open_audit.h"
 #include "navi33_gc_queue_bringup.h"
 #include "navi33_p713_stage_expand.h"
 #include "navi33_p7_pmfw.h"
@@ -497,6 +498,13 @@ private:
     IOMemoryMap *doorbellKeep {nullptr};           // the doorbell BAR mapping, kept while the compute queue is in use
     // rednavi_queue_watch=1: samples the compute queue every 250 ms for two minutes and records every change of its doorbell/control state.
     IOTimerEventSource *watchTimer {nullptr};
+    // P7.33: delayed IOService-only observer. Never opens the PCI device,
+    // maps BARs, or writes an MP1 register. Cancel before stop() releases pci.
+    IOTimerEventSource *lateOwnerTimer {nullptr};
+    IOWorkLoop *lateOwnerWorkLoop {nullptr};
+    uint32_t lateOwnerSamples {0};
+    void scheduleNavi33LateOwnerAudit();
+    void sampleNavi33LateOwnerAudit();
     uint32_t watchTick {0};
     uint32_t watchPrev[5] {};
     uint32_t watchEvents {0};
@@ -3421,6 +3429,95 @@ void RedNaviProbe::mqdSnapshot(const char *property) {
     uint32_t v[12];
     for (int i = 0; i < 12; i++) v[i] = rn_vram_rd32(&gpu, 0x0C022000ull + dw[i] * 4);
     rnPublish(this, property, nm, v, 12);
+}
+
+// P7.33: sample after macOS IOService matching has had time to finish.
+// The callback does not read/modify PCI config or MMIO registers.
+void RedNaviProbe::sampleNavi33LateOwnerAudit() {
+    if (!pci || pci->isInactive()) return;
+    namespace audit = rn_navi33::late_provider_open_audit;
+    audit::Input input{};
+    input.sampled = true;
+    input.providerOpenByAny = pci->isOpen();
+    input.providerOpenByRedNavi = pci->isOpen(this);
+    OSIterator *const it = pci->getChildIterator(gIOServicePlane);
+    if (it) {
+        input.childIteratorAvailable = true;
+        for (OSObject *item = it->getNextObject(); item;
+             item = it->getNextObject()) {
+            IOService *const child = OSDynamicCast(IOService, item);
+            if (!child) continue;
+            ++input.directChildrenObserved;
+            const char *const name = child->getName();
+            if (!name) continue;
+            if (!strcmp(name, "AMDSupport")) {
+                input.amdSupportPresent = true;
+                input.amdSupportProviderOpen = pci->isOpen(child);
+            } else if (!strcmp(name, ".Display_boot")) {
+                input.bootFramebufferPresent = true;
+                input.bootFramebufferProviderOpen = pci->isOpen(child);
+            }
+        }
+        it->release();
+    }
+    const auto report = audit::inspect(input);
+    ++lateOwnerSamples;
+    const char *const names[] = {
+        "sample", "sampled_after_register_service", "sample_valid",
+        "child_iterator_available", "direct_children_observed",
+        "provider_open_by_any", "provider_open_by_rednavi",
+        "amd_support_present", "amd_support_provider_open",
+        "boot_framebuffer_present", "boot_framebuffer_provider_open",
+        "known_sibling_provider_open", "other_host_open_without_rednavi",
+        "foreign_mailbox_writer_excluded", "mailbox_exclusive_proven",
+        "may_issue_smu_command"
+    };
+    const uint32_t vals[] = {
+        lateOwnerSamples, 1u, static_cast<uint32_t>(report.sampled),
+        static_cast<uint32_t>(input.childIteratorAvailable),
+        input.directChildrenObserved,
+        static_cast<uint32_t>(report.providerOpenByAny),
+        static_cast<uint32_t>(report.providerOpenByRedNavi),
+        static_cast<uint32_t>(report.amdSupportPresent),
+        static_cast<uint32_t>(input.amdSupportProviderOpen),
+        static_cast<uint32_t>(report.bootFramebufferPresent),
+        static_cast<uint32_t>(input.bootFramebufferProviderOpen),
+        static_cast<uint32_t>(report.knownSiblingProviderOpen),
+        static_cast<uint32_t>(report.otherHostOpenWithoutRedNavi),
+        static_cast<uint32_t>(report.foreignMailboxWriterExcluded),
+        static_cast<uint32_t>(report.mailboxExclusiveProven),
+        static_cast<uint32_t>(report.mayIssueSmuCommand)
+    };
+    rnPublish(this, lateOwnerSamples == 1u
+        ? "navi33-p7-late-provider-audit-1"
+        : "navi33-p7-late-provider-audit-2",
+        names, vals, sizeof(vals) / sizeof(vals[0]));
+    if (lateOwnerTimer && lateOwnerSamples == 1u)
+        lateOwnerTimer->setTimeoutMS(8000);
+}
+
+void RedNaviProbe::scheduleNavi33LateOwnerAudit() {
+    setProperty("navi33-p7-late-provider-audit-scheduled", false);
+    IOWorkLoop *const wl = getWorkLoop();
+    if (!wl) return;
+    IOTimerEventSource *const timer =
+        IOTimerEventSource::timerEventSource(
+            this, [](OSObject *owner, IOTimerEventSource *) {
+                RedNaviProbe *const self =
+                    OSDynamicCast(RedNaviProbe, owner);
+                if (self) self->sampleNavi33LateOwnerAudit();
+            });
+    if (!timer) return;
+    if (wl->addEventSource(timer) != kIOReturnSuccess) {
+        timer->release();
+        return;
+    }
+    // Retain the workloop for removing this event source in stop().
+    wl->retain();
+    lateOwnerWorkLoop = wl;
+    lateOwnerTimer = timer;
+    lateOwnerTimer->setTimeoutMS(5000);
+    setProperty("navi33-p7-late-provider-audit-scheduled", true);
 }
 
 void RedNaviProbe::watchStep() {
@@ -10608,6 +10705,9 @@ bool RedNaviProbe::start(IOService *provider) {
         // A failed identity can be inspected in IORegistry. No Navi32 PSP,
         // GC, SDMA, DCN, framebuffer or Metal acceleration runs on Navi33.
         registerService();
+        // Capture real host-open state after matching has settled, not
+        // inside start() as P7.28 did. Does not grant any mailbox lease.
+        scheduleNavi33LateOwnerAudit();
         return true;
     }
     // Other non-Navi32 devices retain the legacy diagnostic behaviour.
@@ -10675,6 +10775,18 @@ void RedNaviProbe::stop(IOService *provider) {
     // published host allocation. Dropping software state cannot revoke DMA.
     const bool retainDma = gpuLive;
     gpuLive = false;
+    if (lateOwnerTimer) {
+        lateOwnerTimer->cancelTimeout();
+        lateOwnerTimer->disable();
+        if (lateOwnerWorkLoop)
+            lateOwnerWorkLoop->removeEventSource(lateOwnerTimer);
+        lateOwnerTimer->release();
+        lateOwnerTimer = nullptr;
+    }
+    if (lateOwnerWorkLoop) {
+        lateOwnerWorkLoop->release();
+        lateOwnerWorkLoop = nullptr;
+    }
     if (watchTimer) { watchTimer->cancelTimeout(); if (getWorkLoop()) getWorkLoop()->removeEventSource(watchTimer); watchTimer->release(); watchTimer = nullptr; }
     if (msiSrc) { msiSrc->disable(); if (getWorkLoop()) getWorkLoop()->removeEventSource(msiSrc); msiSrc->release(); msiSrc = nullptr; }
     if (retainDma) rn_mes_forget_workspace();   // this provider's native path; software references only, not GPU quiescence
