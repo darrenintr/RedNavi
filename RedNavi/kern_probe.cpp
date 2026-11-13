@@ -1498,7 +1498,14 @@ void RedNaviProbe::smuProbe(const char *property, bool send) {
         rnPublishOne(out, key, resp);
         snprintf(key, sizeof(key), "%s_arg", m.name);
         rnPublishOne(out, key, result);
-        if (rc == -ETIMEDOUT) WREG32_SOC15(RN_MP1, 0, mmMP1_SMN_C2PMSG_90, 1);   // diagnostic only: let the next message try
+        if (rc == -ETIMEDOUT) {
+            // Legacy Navi32-only diagnostic response recovery must use
+            // the same host-side mailbox mutex. Still NOT a genuine SMU
+            // response; no such recovery exists in the Navi33 P7 path.
+            mutex_lock(&gpu.smu_msg_lock);
+            WREG32_SOC15(RN_MP1, 0, mmMP1_SMN_C2PMSG_90, 1);
+            mutex_unlock(&gpu.smu_msg_lock);
+        }
     }
     rnPublishOne(out, "c2pmsg_90_after", RREG32_SOC15(RN_MP1, 0, mmMP1_SMN_C2PMSG_90));
     // Experiment (boot-arg rednavi_smu_enable=1): Linux's smu_smc_hw_setup ends with EnableAllSmuFeatures; the RLC autoload may
@@ -10033,6 +10040,11 @@ bool RedNaviProbe::start(IOService *provider) {
                     ? p725PreInput.smuResponse : p727a::kInvalid;
                 const auto p727Admission = p727a::inspect(p727Input);
                 bool p727OneShotConsumed = false;
+                // Serialize even the admission-only path against any
+                // cooperating legacy SMU sender on this rn_device. This
+                // does not change p727MailboxLeaseHeld=false or allow MMIO
+                // writes. Do not sleep while holding mmio_idx_lock.
+                mutex_lock(&gpu.smu_msg_lock);
                 const auto p727Roundtrip = p727r::execute(
                     p727Admission, p727Registers, p727MailboxLeaseHeld,
                     p727OneShotConsumed,
@@ -10041,6 +10053,7 @@ bool RedNaviProbe::start(IOService *provider) {
                         wr(offset, value);
                     },
                     [&]() { IODelay(p727r::kPauseMicroseconds); });
+                mutex_unlock(&gpu.smu_msg_lock);
                 const char *const p727Names[] = {
                     "step", "requested", "explicit_opt_in",
                     "unsafe_build_enabled", "mailbox_lease_held",
@@ -10137,7 +10150,8 @@ bool RedNaviProbe::start(IOService *provider) {
                     "amd_support_sibling", "boot_framebuffer_sibling",
                     "all_rednavi_senders_serialized",
                     "foreign_mailbox_writer_excluded",
-                    "mailbox_exclusive_proven", "may_issue_smu_command"
+                    "mailbox_exclusive_proven", "may_issue_smu_command",
+                    "sampled_during_start", "sibling_snapshot_provisional"
                 };
                 const uint32_t p728Values[] = {
                     p7StepArg, static_cast<uint32_t>(p728Input.requested),
@@ -10158,11 +10172,31 @@ bool RedNaviProbe::start(IOService *provider) {
                     static_cast<uint32_t>(
                         p728Owner.mailboxExclusiveProven),
                     static_cast<uint32_t>(
-                        p728Owner.mayIssueSmuCommand)
+                        p728Owner.mayIssueSmuCommand),
+                    1u, 1u // sampled before registerService; later siblings unknown
                 };
                 rnPublish(this, "navi33-p7-mailbox-provider-audit",
                     p728Names, p728Values,
                     sizeof(p728Values) / sizeof(p728Values[0]));
+
+                // P7.29: build-time sender coverage and runtime mutex
+                // snapshot only. This does NOT imply a hardware lease.
+                const char *const p729Names[] = {
+                    "step", "host_mutex_initialized",
+                    "host_mutex_locked_at_snapshot",
+                    "legacy_sender_mutex_guarded",
+                    "p727_sender_mutex_guarded",
+                    "external_mailbox_writers_excluded",
+                    "hardware_smu_command_enabled"
+                };
+                const uint32_t p729Values[] = {
+                    p7StepArg, 1u,
+                    static_cast<uint32_t>(mutex_is_locked(&gpu.smu_msg_lock)),
+                    1u, 1u, 0u, 0u
+                };
+                rnPublish(this, "navi33-p7-smu-host-serializer",
+                    p729Names, p729Values,
+                    sizeof(p729Values) / sizeof(p729Values[0]));
 
                 const auto p725Gate =
                     rn_navi33::p725_rlc_autoload::inspect(p725Input);
