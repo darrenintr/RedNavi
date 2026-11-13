@@ -25,11 +25,11 @@ class LateProviderAuditSourceTests(unittest.TestCase):
         self.assertIn('setTimeoutMS(8000)', source)
 
     def test_late_observer_calls_only_host_service_inspection(self):
+        # Only inspect the IOService observer itself. P7.36/P7.37
+        # optional callbacks are audited by their own independent tests.
         text = self.source.split(
             "void RedNaviProbe::sampleNavi33LateOwnerAudit() {", 1
-        )[1].split(
-            "void RedNaviProbe::watchStep() {", 1
-        )[0]
+        )[1].split("\n}\n", 1)[0]
         self.assertIn("pci->isOpen()", text)
         self.assertIn("pci->isOpen(this)", text)
         self.assertIn("pci->isOpen(child)", text)
