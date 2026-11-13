@@ -336,6 +336,10 @@ test:
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_late_provider_open_audit_test.cpp -o build/navi33_late_provider_open_audit_test
 	./build/navi33_late_provider_open_audit_test
 	python3 -m unittest discover -s tests/host -p navi33_late_provider_static_test.py
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_xnu_access_evidence_test.cpp -o build/navi33_xnu_access_evidence_test
+	./build/navi33_xnu_access_evidence_test
+	python3 -m unittest discover -s tests/host -p navi33_xnu_access_review_test.py
+	python3 -m unittest discover -s tests/host -p navi33_mp1_source_inventory_test.py
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pthread -DRN_HOST_TEST -Icompat/include -IRedNavi tests/host/navi33_smu_host_mutex_test.cpp RedNavi/smu13.cpp tests/host/host_hooks.cpp -o build/navi33_smu_host_mutex_test
 	./build/navi33_smu_host_mutex_test
 	python3 -m unittest discover -s tests/host -p navi33_smu_writer_audit_test.py
