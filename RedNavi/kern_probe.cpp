@@ -140,6 +140,12 @@ static rn_navi33::smu_lifetime_latch::AttemptLatch
     gNavi33SmuKextImageAttemptClaim{};
 #include "navi33_smu_provider_owner_audit.h"
 #include "navi33_late_provider_open_audit.h"
+#include "navi33_p736_mp1_response_sampler.h"
+
+// Separate two-read budget for observational MP1 Response samples.
+// Never use or reset the P7.31 command submission lifetime latch here.
+static rn_navi33::p736_response_sampler::KextBudget
+    gNavi33P736Mp1ResponseReadBudget{};
 #include "navi33_gc_queue_bringup.h"
 #include "navi33_p713_stage_expand.h"
 #include "navi33_p7_pmfw.h"
@@ -503,8 +509,13 @@ private:
     IOTimerEventSource *lateOwnerTimer {nullptr};
     IOWorkLoop *lateOwnerWorkLoop {nullptr};
     uint32_t lateOwnerSamples {0};
+    rn_navi33::p736_response_sampler::State p736ResponseSampler {};
+    rn_navi33::p736_response_sampler::Error p736ConfigError {
+        rn_navi33::p736_response_sampler::Error::Disabled
+    };
     void scheduleNavi33LateOwnerAudit();
     void sampleNavi33LateOwnerAudit();
+    void sampleNavi33P736ResponseMonitor();
     uint32_t watchTick {0};
     uint32_t watchPrev[5] {};
     uint32_t watchEvents {0};
@@ -3431,8 +3442,67 @@ void RedNaviProbe::mqdSnapshot(const char *property) {
     rnPublish(this, property, nm, v, 12);
 }
 
+// P7.36: OPTIONAL direct-mapped BAR5 *read* at each existing late timer.
+// There is no RSMU/MM_INDEX fallback, no new workloop, and no SMU write.
+// The P7.36 policy has consumed a Kext-image-wide slot BEFORE this rd().
+void RedNaviProbe::sampleNavi33P736ResponseMonitor() {
+    namespace monitor = rn_navi33::p736_response_sampler;
+    if (!p736ResponseSampler.requested) return;
+
+    // P7.33 timer callback is serialized on the same existing workloop.
+    // Stop removes that event source before releasing regs; still check
+    // service state, mapping lifetime and BAR length at time of use.
+    const bool mappingReady =
+        regs && regs->getVirtualAddress() != 0u;
+    const uint64_t currentBarBytes =
+        mappingReady ? regs->getLength() : 0ull;
+    const auto snapshot = monitor::sample(
+        p736ResponseSampler, gNavi33P736Mp1ResponseReadBudget,
+        pci && !pci->isInactive() && !isInactive(),
+        mappingReady, currentBarBytes,
+        [this](uint32_t offset) -> uint32_t {
+            return rd(offset); // Exactly one aligned direct BAR5 read.
+        });
+    const uint64_t timestampNs = rn_now_ns();
+    const char *const keys[] = {
+        "sample", "requested", "read_performed", "error",
+        "response", "response_byte_offset",
+        "previous_value_known", "changed_from_previous",
+        "service_read_count", "kext_read_count",
+        "global_read_slot_consumed", "max_kext_image_reads",
+        "timestamp_ns_lo", "timestamp_ns_hi",
+        "register_writes_in_new_path",
+        "mailbox_exclusive_proven", "handshake_verified",
+        "may_issue_smu_command"
+    };
+    const uint32_t values[] = {
+        lateOwnerSamples,
+        static_cast<uint32_t>(p736ResponseSampler.requested),
+        static_cast<uint32_t>(snapshot.readPerformed),
+        static_cast<uint32_t>(snapshot.error),
+        snapshot.response, snapshot.responseByteOffset,
+        static_cast<uint32_t>(snapshot.previousValueKnown),
+        static_cast<uint32_t>(snapshot.newValueDiffers),
+        snapshot.sampleCount,
+        monitor::readsClaimed(gNavi33P736Mp1ResponseReadBudget),
+        static_cast<uint32_t>(snapshot.globalSlotConsumed),
+        monitor::kMaxKextImageReads,
+        static_cast<uint32_t>(timestampNs),
+        static_cast<uint32_t>(timestampNs >> 32),
+        0u,
+        static_cast<uint32_t>(snapshot.mailboxExclusiveProven),
+        static_cast<uint32_t>(snapshot.handshakeVerified),
+        static_cast<uint32_t>(snapshot.mayIssueSmuCommand)
+    };
+    rnPublish(this, lateOwnerSamples == 1u
+        ? "navi33-p7-mp1-response-sample-1"
+        : "navi33-p7-mp1-response-sample-2",
+        keys, values, sizeof(values) / sizeof(values[0]));
+}
+
 // P7.33: sample after macOS IOService matching has had time to finish.
-// The callback does not read/modify PCI config or MMIO registers.
+// Host-provider audit itself performs no GPU reads. Its existing timer
+// optionally invokes P7.36 for a single explicit direct response read.
 void RedNaviProbe::sampleNavi33LateOwnerAudit() {
     if (!pci || pci->isInactive()) return;
     namespace audit = rn_navi33::late_provider_open_audit;
@@ -3492,6 +3562,7 @@ void RedNaviProbe::sampleNavi33LateOwnerAudit() {
         ? "navi33-p7-late-provider-audit-1"
         : "navi33-p7-late-provider-audit-2",
         names, vals, sizeof(vals) / sizeof(vals[0]));
+    sampleNavi33P736ResponseMonitor();
     if (lateOwnerTimer && lateOwnerSamples == 1u)
         lateOwnerTimer->setTimeoutMS(8000);
 }
@@ -4399,6 +4470,46 @@ bool RedNaviProbe::start(IOService *provider) {
         setProperty("navi33-blocks-found", static_cast<uint64_t>(check.blocksFound), 32);
         setProperty("navi33-binary-header-major", static_cast<uint64_t>(check.binaryMajor), 32);
         setProperty("navi33-ip-table-version", static_cast<uint64_t>(check.tableVersion), 32);
+
+        // P7.36: opt-in ONLY. Prepare an address plan from the validated
+        // discovery image; never infer SMU ownership from this preflight.
+        // No MMIO is performed by configure(). The existing P7.33 timer
+        // is reused for at most two reads *per loaded Kext image*.
+        uint32_t p736RawOptIn = 0u;
+        rn_navi33::p736_response_sampler::Config p736Config{};
+        p736Config.explicitOptIn =
+            PE_parse_boot_argn("rednavi_navi33_p736_response_read",
+                               &p736RawOptIn, sizeof(p736RawOptIn)) &&
+            p736RawOptIn == 1u;
+        p736Config.exactNavi33 = check.eligibleForComputeBringup();
+        p736Config.mp1Is13_0_7 =
+            check.observed.smu.major == 13u &&
+            check.observed.smu.minor == 0u &&
+            check.observed.smu.revision == 7u;
+        p736Config.directBar5MappingReady =
+            regs && regs->getVirtualAddress() != 0u;
+        p736Config.bar5MappedBytes =
+            regs ? regs->getLength() : 0ull;
+        p736Config.mp1BaseDword =
+            check.eligibleForComputeBringup() &&
+            rn_navi33::hasComputeRegisterBases(check)
+            ? check.bases.mp1.dwords[0] : 0u;
+        p736ConfigError = rn_navi33::p736_response_sampler::configure(
+            p736ResponseSampler, p736Config);
+        setProperty("navi33-p7-mp1-response-monitor-requested",
+                    p736ResponseSampler.requested);
+        setProperty("navi33-p7-mp1-response-monitor-armed",
+                    p736ResponseSampler.armed);
+        setProperty("navi33-p7-mp1-response-monitor-config-error",
+                    static_cast<uint64_t>(p736ConfigError), 32);
+        setProperty("navi33-p7-mp1-response-monitor-global-cap",
+                    static_cast<uint64_t>(
+                        rn_navi33::p736_response_sampler::kMaxKextImageReads),
+                    32);
+        if (p736ResponseSampler.armed)
+            IOLog("RedNavi: P7.36 explicitly armed for at most two "
+                  "late C2PMSG_90 direct reads per Kext image; "
+                  "NO SMU commands, NO mailbox ownership grant\n");
         if (check.eligibleForComputeBringup()) {
             // Explicitly select the gfx1102 M4 flavor without using the
             // Navi32 firmware, GART, MES or queue start path.
@@ -10787,6 +10898,9 @@ void RedNaviProbe::stop(IOService *provider) {
         lateOwnerWorkLoop->release();
         lateOwnerWorkLoop = nullptr;
     }
+    // No further P7.36 callbacks after removing the shared event source.
+    // Keep the image-global atomic read budget consumed across re-probes.
+    rn_navi33::p736_response_sampler::stop(p736ResponseSampler);
     if (watchTimer) { watchTimer->cancelTimeout(); if (getWorkLoop()) getWorkLoop()->removeEventSource(watchTimer); watchTimer->release(); watchTimer = nullptr; }
     if (msiSrc) { msiSrc->disable(); if (getWorkLoop()) getWorkLoop()->removeEventSource(msiSrc); msiSrc->release(); msiSrc = nullptr; }
     if (retainDma) rn_mes_forget_workspace();   // this provider's native path; software references only, not GPU quiescence

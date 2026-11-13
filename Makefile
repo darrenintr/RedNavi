@@ -343,6 +343,9 @@ test:
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_p735_passive_mp1_read_plan_test.cpp -o build/navi33_p735_passive_mp1_read_plan_test
 	./build/navi33_p735_passive_mp1_read_plan_test
 	python3 -m unittest discover -s tests/host -p navi33_p735_passive_mmio_source_test.py
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -pthread -IRedNavi tests/host/navi33_p736_mp1_response_sampler_test.cpp -o build/navi33_p736_mp1_response_sampler_test
+	./build/navi33_p736_mp1_response_sampler_test
+	python3 -m unittest discover -s tests/host -p navi33_p736_kernel_mmio_audit_test.py
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pthread -DRN_HOST_TEST -Icompat/include -IRedNavi tests/host/navi33_smu_host_mutex_test.cpp RedNavi/smu13.cpp tests/host/host_hooks.cpp -o build/navi33_smu_host_mutex_test
 	./build/navi33_smu_host_mutex_test
 	python3 -m unittest discover -s tests/host -p navi33_smu_writer_audit_test.py
