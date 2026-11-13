@@ -141,11 +141,17 @@ static rn_navi33::smu_lifetime_latch::AttemptLatch
 #include "navi33_smu_provider_owner_audit.h"
 #include "navi33_late_provider_open_audit.h"
 #include "navi33_p736_mp1_response_sampler.h"
+#include "navi33_p737_passive_mailbox_triplet.h"
 
 // Separate two-read budget for observational MP1 Response samples.
 // Never use or reset the P7.31 command submission lifetime latch here.
 static rn_navi33::p736_response_sampler::KextBudget
     gNavi33P736Mp1ResponseReadBudget{};
+
+// Independent budget for P7.37's four OPTIONAL extra host reads.
+// Never modify the P7.31 SMU-command attempt latch.
+static rn_navi33::p737_passive_mailbox_triplet::ImageBudget
+    gNavi33P737AdditionalReadBudget{};
 #include "navi33_gc_queue_bringup.h"
 #include "navi33_p713_stage_expand.h"
 #include "navi33_p7_pmfw.h"
@@ -513,9 +519,16 @@ private:
     rn_navi33::p736_response_sampler::Error p736ConfigError {
         rn_navi33::p736_response_sampler::Error::Disabled
     };
+    uint32_t p736LastReadTick {0u};
+    uint32_t p736LastReadValue {0xffffffffu};
+    rn_navi33::p737_passive_mailbox_triplet::State p737TripletState {};
+    rn_navi33::p737_passive_mailbox_triplet::Status p737ConfigStatus {
+        rn_navi33::p737_passive_mailbox_triplet::Status::Disabled
+    };
     void scheduleNavi33LateOwnerAudit();
     void sampleNavi33LateOwnerAudit();
     void sampleNavi33P736ResponseMonitor();
+    void sampleNavi33P737PassiveTriplet();
     uint32_t watchTick {0};
     uint32_t watchPrev[5] {};
     uint32_t watchEvents {0};
@@ -3463,6 +3476,10 @@ void RedNaviProbe::sampleNavi33P736ResponseMonitor() {
         [this](uint32_t offset) -> uint32_t {
             return rd(offset); // Exactly one aligned direct BAR5 read.
         });
+    if (snapshot.readPerformed) {
+        p736LastReadTick = lateOwnerSamples;
+        p736LastReadValue = snapshot.response;
+    }
     const uint64_t timestampNs = rn_now_ns();
     const char *const keys[] = {
         "sample", "requested", "read_performed", "error",
@@ -3563,8 +3580,76 @@ void RedNaviProbe::sampleNavi33LateOwnerAudit() {
         : "navi33-p7-late-provider-audit-2",
         names, vals, sizeof(vals) / sizeof(vals[0]));
     sampleNavi33P736ResponseMonitor();
+    sampleNavi33P737PassiveTriplet();
     if (lateOwnerTimer && lateOwnerSamples == 1u)
         lateOwnerTimer->setTimeoutMS(8000);
+}
+
+// P7.37: only when a SAME-TICK P7.36 response was actually read.
+// Two more direct BAR5 loads, no index writes or command submission.
+// These are sequential, NOT an atomic three-register transaction.
+void RedNaviProbe::sampleNavi33P737PassiveTriplet() {
+    namespace triplet = rn_navi33::p737_passive_mailbox_triplet;
+    if (!p737TripletState.requested) return;
+    const bool mappingPresent = regs && regs->getVirtualAddress() != 0u;
+    const uint64_t length = mappingPresent ? regs->getLength() : 0ull;
+    const auto snapshot = triplet::sample(
+        p737TripletState, gNavi33P737AdditionalReadBudget,
+        lateOwnerSamples,
+        pci && !pci->isInactive() && !isInactive(),
+        mappingPresent, length,
+        p736LastReadTick, p736LastReadValue,
+        p736ResponseSampler.responseByteOffset,
+        [this](uint32_t offset) -> uint32_t {
+            return rd(offset);
+        });
+    const uint64_t timestampNs = rn_now_ns();
+    const char *const keys[] = {
+        "sample", "requested", "read_performed", "status",
+        "evidence_class", "message", "parameter", "response",
+        "message_byte_offset", "parameter_byte_offset",
+        "response_byte_offset", "paired_p736_response_from_this_tick",
+        "previous_triplet_available", "message_changed",
+        "parameter_changed", "response_changed",
+        "service_triplets", "additional_reads_this_sample",
+        "kext_additional_reads_claimed", "kext_additional_read_cap",
+        "response_was_read_before_message_parameter",
+        "timestamp_ns_lo", "timestamp_ns_hi",
+        "rednavi_command_submitted_proven",
+        "external_host_writer_attributed",
+        "firmware_response_to_new_command_proven",
+        "mailbox_exclusive_proven", "may_issue_smu_command"
+    };
+    const uint32_t values[] = {
+        lateOwnerSamples,
+        static_cast<uint32_t>(p737TripletState.requested),
+        static_cast<uint32_t>(snapshot.readPerformed),
+        static_cast<uint32_t>(snapshot.status),
+        static_cast<uint32_t>(snapshot.evidence),
+        snapshot.message, snapshot.parameter, snapshot.response,
+        snapshot.messageByteOffset, snapshot.parameterByteOffset,
+        snapshot.responseByteOffset,
+        static_cast<uint32_t>(snapshot.pairedResponseFromThisTick),
+        static_cast<uint32_t>(snapshot.previousTripletAvailable),
+        static_cast<uint32_t>(snapshot.messageChanged),
+        static_cast<uint32_t>(snapshot.parameterChanged),
+        static_cast<uint32_t>(snapshot.responseChanged),
+        snapshot.serviceTriplets, snapshot.additionalReadsThisSample,
+        triplet::claimedReads(gNavi33P737AdditionalReadBudget),
+        triplet::kMaxAdditionalDwordReads,
+        1u, static_cast<uint32_t>(timestampNs),
+        static_cast<uint32_t>(timestampNs >> 32),
+        static_cast<uint32_t>(snapshot.rednaviCommandSubmittedProven),
+        static_cast<uint32_t>(snapshot.appleOrOtherHostWriterAttributed),
+        static_cast<uint32_t>(
+            snapshot.firmwareResponseToNewCommandProven),
+        static_cast<uint32_t>(snapshot.mailboxExclusiveProven),
+        static_cast<uint32_t>(snapshot.mayIssueSmuCommand)
+    };
+    rnPublish(this, lateOwnerSamples == 1u
+        ? "navi33-p7-mp1-triplet-sample-1"
+        : "navi33-p7-mp1-triplet-sample-2",
+        keys, values, sizeof(values) / sizeof(values[0]));
 }
 
 void RedNaviProbe::scheduleNavi33LateOwnerAudit() {
@@ -4510,6 +4595,39 @@ bool RedNaviProbe::start(IOService *provider) {
             IOLog("RedNavi: P7.36 explicitly armed for at most two "
                   "late C2PMSG_90 direct reads per Kext image; "
                   "NO SMU commands, NO mailbox ownership grant\n");
+
+        // P7.37 requires BOTH its own opt-in and an armed P7.36.
+        // All offsets are derived from the same verified discovery image.
+        // No new hardware I/O occurs while configuring this plan.
+        uint32_t p737RawOptIn = 0u;
+        rn_navi33::p737_passive_mailbox_triplet::Config p737Config{};
+        p737Config.explicitOptIn =
+            PE_parse_boot_argn("rednavi_navi33_p737_triplet_read",
+                               &p737RawOptIn, sizeof(p737RawOptIn)) &&
+            p737RawOptIn == 1u;
+        p737Config.p736ResponseArmed = p736ResponseSampler.armed;
+        p737Config.exactNavi33 = p736Config.exactNavi33;
+        p737Config.mp1Is13_0_7 = p736Config.mp1Is13_0_7;
+        p737Config.directBar5MappingReady =
+            p736Config.directBar5MappingReady;
+        p737Config.mp1BaseDword = p736Config.mp1BaseDword;
+        p737Config.bar5MappedBytes = p736Config.bar5MappedBytes;
+        p737ConfigStatus = rn_navi33::p737_passive_mailbox_triplet::configure(
+            p737TripletState, p737Config);
+        setProperty("navi33-p7-mp1-triplet-requested",
+                    p737TripletState.requested);
+        setProperty("navi33-p7-mp1-triplet-armed",
+                    p737TripletState.armed);
+        setProperty("navi33-p7-mp1-triplet-config-status",
+                    static_cast<uint64_t>(p737ConfigStatus), 32);
+        setProperty("navi33-p7-mp1-triplet-extra-read-cap",
+                    static_cast<uint64_t>(
+                        rn_navi33::p737_passive_mailbox_triplet::
+                            kMaxAdditionalDwordReads), 32);
+        if (p737TripletState.armed)
+            IOLog("RedNavi: P7.37 explicitly armed for four extra "
+                  "C2PMSG_66/82 direct reads per Kext image; "
+                  "NO commands and NO writer attribution\n");
         if (check.eligibleForComputeBringup()) {
             // Explicitly select the gfx1102 M4 flavor without using the
             // Navi32 firmware, GART, MES or queue start path.
@@ -10901,6 +11019,7 @@ void RedNaviProbe::stop(IOService *provider) {
     // No further P7.36 callbacks after removing the shared event source.
     // Keep the image-global atomic read budget consumed across re-probes.
     rn_navi33::p736_response_sampler::stop(p736ResponseSampler);
+    rn_navi33::p737_passive_mailbox_triplet::stop(p737TripletState);
     if (watchTimer) { watchTimer->cancelTimeout(); if (getWorkLoop()) getWorkLoop()->removeEventSource(watchTimer); watchTimer->release(); watchTimer = nullptr; }
     if (msiSrc) { msiSrc->disable(); if (getWorkLoop()) getWorkLoop()->removeEventSource(msiSrc); msiSrc->release(); msiSrc = nullptr; }
     if (retainDma) rn_mes_forget_workspace();   // this provider's native path; software references only, not GPU quiescence
