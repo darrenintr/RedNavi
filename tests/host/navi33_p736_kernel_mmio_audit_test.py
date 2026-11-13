@@ -94,14 +94,19 @@ class Navi33P736ReadOnlyKernelAudit(unittest.TestCase):
 
     def test_no_elevated_rights_from_a_response_transition(self):
         mon = self.monitor
-        self.assertIn("bool mailboxExclusiveProven = false;", mon)
-        self.assertIn("bool handshakeVerified = false;", mon)
-        self.assertIn("bool mayIssueSmuCommand = false;", mon)
-        self.assertIn("return r;", mon)
+        # Exclude descriptive comments (which correctly mention Linux
+        # RREG32 polling) when checking actual executable statements.
+        code_only = "\n".join(
+            line.split("//", 1)[0] for line in mon.splitlines()
+        )
+        self.assertIn("bool mailboxExclusiveProven = false;", code_only)
+        self.assertIn("bool handshakeVerified = false;", code_only)
+        self.assertIn("bool mayIssueSmuCommand = false;", code_only)
+        self.assertIn("return r;", code_only)
         for forbidden in ("WREG32", "RREG32", "readl(", "writel(",
                           "pci->open(", "configWrite",
                           "vramRead(", "rn_smu13_send(", "wr(", "rd("):
-            self.assertNotIn(forbidden, mon, msg=forbidden)
+            self.assertNotIn(forbidden, code_only, msg=forbidden)
 
 
 if __name__ == "__main__":
