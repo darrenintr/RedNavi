@@ -131,6 +131,13 @@
 #include "navi33_mp1_fwflags_smn_probe.h"
 #include "navi33_smu_mailbox_admission.h"
 #include "navi33_smu_mailbox_roundtrip.h"
+
+// P7.31: one atomic attempt claim shared by *all* Navi33 service
+// instances in this loaded Kext image. Never reset in stop()/start().
+// This is conservative across multiple RX 7600 GPUs and is NOT
+// persisted across unloading/reloading the entire Kext.
+static rn_navi33::smu_lifetime_latch::AttemptLatch
+    gNavi33SmuKextImageAttemptClaim{};
 #include "navi33_smu_provider_owner_audit.h"
 #include "navi33_gc_queue_bringup.h"
 #include "navi33_p713_stage_expand.h"
@@ -10055,7 +10062,7 @@ bool RedNaviProbe::start(IOService *provider) {
                 mutex_lock(&gpu.smu_msg_lock);
                 const auto p727Roundtrip = p727r::execute(
                     p727Admission, p727Registers, p727MailboxLeaseHeld,
-                    p730SmuSession,
+                    p730SmuSession, gNavi33SmuKextImageAttemptClaim,
                     [&](uint32_t offset) { return rd(offset); },
                     [&](uint32_t offset, uint32_t value) {
                         wr(offset, value);
@@ -10240,6 +10247,34 @@ bool RedNaviProbe::start(IOService *provider) {
                 rnPublish(this, "navi33-p7-smu-transaction-guard",
                     p730Names, p730Values,
                     sizeof(p730Values) / sizeof(p730Values[0]));
+
+                // P7.31: cross-service (same loaded Kext image) latch.
+                // No new hardware operations or mailbox admission.
+                // This never implies security against other Kexts,
+                // independent GPU functions, or PMFW/PSP actors.
+                const char *const p731Names[] = {
+                    "step", "one_slot_all_navi33_in_kext",
+                    "survives_service_reprobe", "survives_kext_reload",
+                    "attempt_slot_claimed",
+                    "this_service_claim_acquired",
+                    "service_instance_consumed",
+                    "unreviewed_external_writers_remain",
+                    "mailbox_exclusive_proven",
+                    "live_smu_command_enabled"
+                };
+                const uint32_t p731Values[] = {
+                    p7StepArg, 1u, 1u, 0u,
+                    static_cast<uint32_t>(
+                        rn_navi33::smu_lifetime_latch::isClaimed(
+                            gNavi33SmuKextImageAttemptClaim)),
+                    static_cast<uint32_t>(
+                        p727Roundtrip.globalAttemptClaimAcquired),
+                    static_cast<uint32_t>(p730SmuSession.consumed),
+                    1u, 0u, 0u
+                };
+                rnPublish(this, "navi33-p7-smu-lifetime-latch",
+                    p731Names, p731Values,
+                    sizeof(p731Values) / sizeof(p731Values[0]));
 
                 const auto p725Gate =
                     rn_navi33::p725_rlc_autoload::inspect(p725Input);
