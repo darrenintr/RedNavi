@@ -72,12 +72,22 @@ def summarize(text: str) -> dict[str, object]:
     snapshots = parse_snapshots(text)
     observed = [s for s in snapshots if s["sample_valid"] == 1]
     last = observed[-1] if observed else None
-    any_apple_attached = any(
-        s.get("amd_support_present") == 1 or
-        s.get("boot_framebuffer_present") == 1 for s in observed
+    attachment_samples = [
+        s for s in observed if s.get("amd_support_present") is not None
+        or s.get("boot_framebuffer_present") is not None
+    ]
+    host_open_samples = [
+        s for s in observed if s.get("provider_open_by_any") is not None
+    ]
+    any_apple_attached = (
+        any(s.get("amd_support_present") == 1 or
+            s.get("boot_framebuffer_present") == 1
+            for s in attachment_samples)
+        if attachment_samples else None
     )
-    any_host_open = any(
-        s.get("provider_open_by_any") == 1 for s in observed
+    any_host_open = (
+        any(s.get("provider_open_by_any") == 1 for s in host_open_samples)
+        if host_open_samples else None
     )
     observed_no_host_open = (
         last.get("host_open_reported_no_at_that_instant")
