@@ -57,6 +57,23 @@ class SmuMailboxWriterAudit(unittest.TestCase):
         self.assertIn("[]() { return rn_now_ns(); }", kern)
         self.assertIn('"navi33-p7-smu-transaction-guard"', kern)
 
+    def test_cross_service_claim_is_required_but_cannot_enable_hardware(self):
+        kern = self.read("RedNavi/kern_probe.cpp")
+        transport = self.read("RedNavi/navi33_smu_mailbox_roundtrip.h")
+        lifetime = self.read("RedNavi/navi33_smu_lifetime_latch.h")
+
+        self.assertIn("gNavi33SmuKextImageAttemptClaim", kern)
+        self.assertIn(
+            "p730SmuSession, gNavi33SmuKextImageAttemptClaim,", kern)
+        self.assertIn('"navi33-p7-smu-lifetime-latch"', kern)
+        self.assertIn("constexpr bool p727MailboxLeaseHeld = false;", kern)
+        self.assertIn("smu_lifetime_latch::claimOnce(globalClaim)", transport)
+        self.assertIn("CrossServiceAttemptAlreadyClaimed", transport)
+        self.assertIn("__atomic_compare_exchange_n", lifetime)
+        self.assertNotIn("void reset", lifetime)
+        self.assertIn('"survives_kext_reload"', kern)
+        self.assertIn('"mailbox_exclusive_proven"', kern)
+
     def test_deadline_and_quarantine_are_distinct_from_poll_count(self):
         rt = self.read("RedNavi/navi33_smu_mailbox_roundtrip.h")
         self.assertIn("constexpr uint64_t kDeadlineNanoseconds", rt)
