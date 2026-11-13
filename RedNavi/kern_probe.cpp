@@ -1547,9 +1547,11 @@ void RedNaviProbe::smuProbe(const char *property, bool send) {
             // Legacy Navi32-only diagnostic response recovery must use
             // the same host-side mailbox mutex. Still NOT a genuine SMU
             // response; no such recovery exists in the Navi33 P7 path.
+            mutex_lock(rn_smu_host_coordinator());
             mutex_lock(rn_smu_message_mutex(adev));
             WREG32_SOC15(RN_MP1, 0, mmMP1_SMN_C2PMSG_90, 1);
             mutex_unlock(rn_smu_message_mutex(adev));
+            mutex_unlock(rn_smu_host_coordinator());
         }
     }
     rnPublishOne(out, "c2pmsg_90_after", RREG32_SOC15(RN_MP1, 0, mmMP1_SMN_C2PMSG_90));
@@ -10385,6 +10387,7 @@ bool RedNaviProbe::start(IOService *provider) {
                 // cooperating legacy SMU sender on this rn_device. This
                 // does not change p727MailboxLeaseHeld=false or allow MMIO
                 // writes. Do not sleep while holding mmio_idx_lock.
+                mutex_lock(rn_smu_host_coordinator());
                 mutex_lock(&gpu.smu_msg_lock);
                 const auto p727Roundtrip = p727r::execute(
                     p727Admission, p727Registers, p727MailboxLeaseHeld,
@@ -10396,6 +10399,7 @@ bool RedNaviProbe::start(IOService *provider) {
                     [&]() { IODelay(p727r::kPauseMicroseconds); },
                     []() { return rn_now_ns(); });
                 mutex_unlock(&gpu.smu_msg_lock);
+                mutex_unlock(rn_smu_host_coordinator());
                 const char *const p727Names[] = {
                     "step", "requested", "explicit_opt_in",
                     "unsafe_build_enabled", "mailbox_lease_held",

@@ -6,6 +6,10 @@
 
 namespace {
 
+// Conservatively serializes even different GPUs in this Kext image.
+// No lifecycle reset; external drivers and firmware do not participate.
+static DEFINE_MUTEX(gSmuHostCoordinator);
+
 // Waits for the response register to become non-zero. Returns 0 on timeout.
 u32 pollResponse(struct rn_device *adev, unsigned long timeout_us) {
     ktime_t start = ktime_get();
@@ -43,8 +47,14 @@ int decode(u32 resp) {
 
 }
 
+extern "C" struct mutex *rn_smu_host_coordinator(void) {
+    return &gSmuHostCoordinator;
+}
+
 extern "C" int rn_smu13_send(struct rn_device *adev, u32 msg, u32 arg, u32 *out, u32 *resp, unsigned long timeout_us) {
     if (!adev) return -EINVAL;
+    // Lock order: image coordinator, then per-device SMU mutex.
+    ScopedSmuMessageLock imageGuard(rn_smu_host_coordinator());
     ScopedSmuMessageLock guard(rn_smu_message_mutex(adev));
     // The previous message has to be finished before the response register can be reused.
     u32 r = pollResponse(adev, timeout_us);

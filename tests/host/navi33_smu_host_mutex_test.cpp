@@ -79,9 +79,14 @@ int main() {
     legacy.smu_msg_lock_override = &d.smu_msg_lock;
     assert(rn_smu_message_mutex(&legacy) == &d.smu_msg_lock);
     assert(rn_smu_message_mutex(&d) == &d.smu_msg_lock);
+    // Independent service instance: no override and a different device mutex.
+    rn_device other{};
+    mutex_init(&other.smu_msg_lock);
+    other.reg_offset[RN_MP1_HWIP][0][0] = kBase;
+    assert(rn_smu_message_mutex(&other) != rn_smu_message_mutex(&d));
     std::atomic<bool> go{false};
-    int rc1 = -1, rc2 = -1;
-    u32 version1 = 0, version2 = 0, resp1 = 0, resp2 = 0;
+    int rc1 = -1, rc2 = -1, rc3 = -1;
+    u32 version1 = 0, version2 = 0, version3 = 0, resp1 = 0, resp2 = 0, resp3 = 0;
     std::thread first([&]() {
         while (!go.load(std::memory_order_acquire))
             std::this_thread::yield();
@@ -94,13 +99,21 @@ int main() {
         rc2 = rn_smu13_send(&legacy, PPSMC_MSG_GetSmuVersion, 0,
                             &version2, &resp2, 500000);
     });
+    std::thread third([&]() {
+        while (!go.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        rc3 = rn_smu13_send(&other, PPSMC_MSG_GetSmuVersion, 0,
+                            &version3, &resp3, 500000);
+    });
     go.store(true, std::memory_order_release);
     first.join();
     second.join();
-    assert(rc1 == 0 && rc2 == 0);
-    assert(resp1 == PPSMC_Result_OK && resp2 == PPSMC_Result_OK);
-    assert(version1 == bus.result && version2 == bus.result);
-    assert(bus.messages == 2 && bus.complete == 2 && bus.maxActive == 1);
+    third.join();
+    assert(rc1 == 0 && rc2 == 0 && rc3 == 0);
+    assert(resp1 == PPSMC_Result_OK && resp2 == PPSMC_Result_OK && resp3 == PPSMC_Result_OK);
+    assert(version1 == bus.result && version2 == bus.result && version3 == bus.result);
+    assert(bus.messages == 3 && bus.complete == 3 && bus.maxActive == 1);
+    assert(!mutex_is_locked(rn_smu_host_coordinator()));
     assert(!mutex_is_locked(&d.smu_msg_lock));
 
     // Missing previous response: time out without issuing any new
@@ -113,7 +126,8 @@ int main() {
     const int timedOut = rn_smu13_send(&d, PPSMC_MSG_GetSmuVersion, 0,
                                      nullptr, &timedResp, 1000);
     assert(timedOut != 0 && timedResp == 0);
-    assert(bus.messages == 2 && !mutex_is_locked(&d.smu_msg_lock));
+    assert(bus.messages == 3 && !mutex_is_locked(&d.smu_msg_lock));
+    assert(!mutex_is_locked(rn_smu_host_coordinator()));
 
     // Firmware BUSY is not success; the mutex is still released.
     {
@@ -125,6 +139,7 @@ int main() {
     const int busy = rn_smu13_send(&d, PPSMC_MSG_GetSmuVersion, 0,
                                    nullptr, &busyResp, 500000);
     assert(busy != 0 && busyResp == PPSMC_Result_CmdRejectedBusy);
-    assert(bus.messages == 3 && bus.maxActive == 1);
+    assert(bus.messages == 4 && bus.maxActive == 1);
+    assert(!mutex_is_locked(rn_smu_host_coordinator()));
     assert(!mutex_is_locked(&d.smu_msg_lock));
 }
