@@ -7,6 +7,7 @@
 #include <linux/device.h>
 #include <linux/io.h>
 #include <linux/spinlock.h>
+#include <linux/mutex.h>
 #include <linux/kernel.h>
 
 enum rn_hw_ip {
@@ -51,6 +52,9 @@ struct rn_device {
     enum rn_gc11_gfxhub_variant gfxhub_variant; // set after IP identity validation
     u32 reg_offset[RN_HWIP_MAX][RN_MAX_INST][RN_MAX_SEG];   // dword base of each IP segment (IP discovery)
     spinlock_t mmio_idx_lock;
+    // Sleepable lock shared by the legacy SMU13 sender and Navi33 P7.27.
+    // This is host-driver serialization only, NOT a firmware mailbox lease.
+    struct mutex smu_msg_lock;
 };
 
 #ifdef __cplusplus

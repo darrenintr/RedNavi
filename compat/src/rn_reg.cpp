@@ -9,6 +9,7 @@ void rn_device_init(struct rn_device *adev, const char *name, volatile void *rmm
     adev->rmmio = static_cast<volatile u8 *>(rmmio);
     adev->rmmio_size = rmmio_size;
     spin_lock_init(&adev->mmio_idx_lock);
+    mutex_init(&adev->smu_msg_lock);
 }
 
 // Registers inside the mapped BAR are read directly. Anything past its end goes through the RSMU index/data pair of the NBIO

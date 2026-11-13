@@ -331,6 +331,8 @@ test:
 	./build/navi33_smu_mailbox_roundtrip_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_smu_provider_owner_audit_test.cpp -o build/navi33_smu_provider_owner_audit_test
 	./build/navi33_smu_provider_owner_audit_test
+	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pthread -DRN_HOST_TEST -Icompat/include -IRedNavi tests/host/navi33_smu_host_mutex_test.cpp RedNavi/smu13.cpp tests/host/host_hooks.cpp -o build/navi33_smu_host_mutex_test
+	./build/navi33_smu_host_mutex_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_mp1_fwflags_smn_probe_test.cpp -o build/navi33_mp1_fwflags_smn_probe_test
 	./build/navi33_mp1_fwflags_smn_probe_test
 	$(HOST_CXX) -std=c++17 -Wall -Wextra -Werror -pedantic -IRedNavi tests/host/navi33_gc_queue_bringup_test.cpp -o build/navi33_gc_queue_bringup_test

@@ -17,6 +17,19 @@ u32 pollResponse(struct rn_device *adev, unsigned long timeout_us) {
     }
 }
 
+// The full SMU transaction holds a sleeping mutex. Do not use the
+// MMIO-index spinlock for firmware polling (pollResponse can sleep).
+// The mutex only serializes cooperating RedNavi host clients.
+struct ScopedSmuMessageLock {
+    struct mutex *lock;
+    explicit ScopedSmuMessageLock(struct mutex *m) : lock(m) {
+        mutex_lock(lock);
+    }
+    ~ScopedSmuMessageLock() { mutex_unlock(lock); }
+    ScopedSmuMessageLock(const ScopedSmuMessageLock &) = delete;
+    ScopedSmuMessageLock &operator=(const ScopedSmuMessageLock &) = delete;
+};
+
 int decode(u32 resp) {
     switch (resp) {
     case PPSMC_Result_OK: return 0;
@@ -31,6 +44,8 @@ int decode(u32 resp) {
 }
 
 extern "C" int rn_smu13_send(struct rn_device *adev, u32 msg, u32 arg, u32 *out, u32 *resp, unsigned long timeout_us) {
+    if (!adev) return -EINVAL;
+    ScopedSmuMessageLock guard(&adev->smu_msg_lock);
     // The previous message has to be finished before the response register can be reused.
     u32 r = pollResponse(adev, timeout_us);
     if (!r) { if (resp) *resp = 0; return -ETIMEDOUT; }
