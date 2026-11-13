@@ -1,12 +1,13 @@
 // P7.29: exercise the actual rn_smu13_send() sender with mock MMIO.
 // Two threads must never issue overlapping MP1 C2PMSG transactions on
 // one rn_device. No real GPU registers or firmware are accessed.
-#include "smu13.h"
 #include <atomic>
 #include <cassert>
 #include <chrono>
 #include <mutex>
 #include <thread>
+// Bring in C++ standard library types before LinuxKPI swap/min macros.
+#include "smu13.h"
 
 namespace {
 constexpr u32 kBase = 0x100u;
