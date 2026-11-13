@@ -35,6 +35,16 @@ class ProvenanceTests(unittest.TestCase):
             self.assertEqual(r['provenance']['runtime_register_transition'], 'unknown')
             self.assertFalse(r['decision']['may_issue_smu_command'])
 
+    def test_duplicate_fields_are_ambiguous_even_if_last_value_is_safe(self):
+        raw = fixture().replace('"mailbox_exclusive_proven"=0',
+                                '"mailbox_exclusive_proven"=1,"mailbox_exclusive_proven"=0', 1)
+        r = p739.report(self.sources, raw)
+        self.assertEqual(r['capture_audit']['findings'], [])
+        self.assertFalse(r['evidence_complete'])
+        self.assertEqual(r['duplicate_sample_fields'][0]['field'], 'mailbox_exclusive_proven')
+        self.assertEqual(r['provenance']['runtime_register_transition'], 'unknown')
+        self.assertFalse(r['decision']['may_issue_smu_command'])
+
     def test_dynamic_and_indirect_candidates_are_retained(self):
         src = {'new/path.cpp': 'void f() { wr(offset, v); rn_wreg32(dev, reg, v); }\n'
                                'void g() { writel(v, base + RN_RSMU_DATA); }\n'}

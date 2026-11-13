@@ -2,6 +2,7 @@
 """Offline, conservative source and saved-capture MP1 provenance report."""
 from __future__ import annotations
 import argparse
+from collections import Counter
 import hashlib
 import json
 from pathlib import Path
@@ -71,12 +72,23 @@ def inventory(sources: dict[str, str]) -> dict:
 def report(sources: dict[str, str], capture: str | None) -> dict:
     source = inventory(sources)
     saved = audit.audit_saved_capture(capture, sources) if capture is not None else None
-    valid = saved is not None and saved['sample_integrity'] == 'consistent_observations'
+    ambiguities = []
+    if capture is not None:
+        for match in audit.NAMED_SAMPLE.finditer(capture):
+            keys = [field.group('key') for field in audit.triplet_evidence.FIELD.finditer(match.group(3))]
+            for key, count in sorted(Counter(keys).items()):
+                if count > 1:
+                    ambiguities.append({'kind': match.group(1), 'sample': int(match.group(2)),
+                                        'field': key, 'occurrences': count})
+    valid = (saved is not None and not ambiguities and
+             saved['sample_integrity'] == 'consistent_observations')
     changed = saved['samples'][1]['changed_from_previous'] if valid else None
     return {
         'schema': 'navi33-p739-writer-provenance-v1', 'offline_only': True,
         'hardware_reads_or_writes': 0, 'source_inventory': source,
         'capture_audit': saved,
+        'capture_sha256': hashlib.sha256(capture.encode('utf-8')).hexdigest() if capture is not None else None,
+        'duplicate_sample_fields': ambiguities,
         'provenance': {
             'source_visible_potential_writers': 'candidates_only',
             'runtime_register_transition': ('observed_between_sequential_samples' if changed is True
