@@ -54,6 +54,45 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIn('indirect_aperture', rows[1]['kinds'])
         self.assertFalse(p739.inventory(src)['all_possible_writers_excluded'])
 
+    def test_candidate_delta_detects_new_dynamic_write_and_duplicate(self):
+        old = p739.inventory({'a.cpp': 'wr(offset, value);\n'})
+        new = p739.inventory({'a.cpp': 'wr(offset, value);\nwr(offset, value);\n'
+                                        'writel(value, base + RN_RSMU_DATA);\n'})
+        delta = p739.candidate_delta(old, new)
+        self.assertTrue(delta['review_required'])
+        self.assertEqual(sum(row['count'] for row in delta['added']), 2)
+        self.assertEqual(delta['removed'], [])
+
+    def test_candidate_delta_ignores_line_movement_but_detects_gate_change(self):
+        old = p739.inventory({'a.cpp': 'constexpr bool p727MailboxLeaseHeld = false;\n'})
+        moved = p739.inventory({'a.cpp': '\nconstexpr bool p727MailboxLeaseHeld = false;\n'})
+        changed = p739.inventory({'a.cpp': 'constexpr bool p727MailboxLeaseHeld = true;\n'})
+        self.assertFalse(p739.candidate_delta(old, moved)['review_required'])
+        self.assertTrue(p739.candidate_delta(old, changed)['review_required'])
+
+    def test_delta_compares_content_beyond_excerpt(self):
+        prefix = 'wr(offset, value); ' + ('x' * 250)
+        old = p739.inventory({'a.cpp': prefix + 'A\n'})
+        new = p739.inventory({'a.cpp': prefix + 'B\n'})
+        self.assertEqual(old['candidates'][0]['text'], new['candidates'][0]['text'])
+        self.assertTrue(p739.candidate_delta(old, new)['review_required'])
+
+    def test_bad_revision_is_rejected(self):
+        import subprocess
+        with self.assertRaises(subprocess.CalledProcessError):
+            p739.load_revision_sources(ROOT, '--not-a-real-revision')
+
+    def test_numeric_mailbox_and_raw_volatile_are_candidates(self):
+        r = p739.inventory({'a.cpp': 'auto x = 0x58a68;\n'
+                                     'volatile uint32_t *ptr;\n'})
+        self.assertIn('observed_mailbox_offsets', r['candidates'][0]['kinds'])
+        self.assertIn('volatile_mmio', r['candidates'][1]['kinds'])
+
+    def test_revision_inventory_matches_tracked_file(self):
+        sources = p739.load_revision_sources(ROOT, 'HEAD')
+        self.assertIn('RedNavi/kern_probe.cpp', sources)
+        self.assertIn('p727MailboxLeaseHeld = false', sources['RedNavi/kern_probe.cpp'])
+
     def test_disabled_gate_change_is_detected(self):
         sources = dict(self.sources)
         name = 'RedNavi/kern_probe.cpp'

@@ -4,11 +4,13 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tarfile
 
 import navi33_mp1_source_inventory as baseline
 import navi33_p738_ownership_audit as audit
@@ -27,6 +29,9 @@ PATTERNS = {
     'pci_config_access': r'\b(?:configRead|configWrite|extendedConfigRead|extendedConfigWrite)(?:8|16|32)\s*\(',
     'bar_mapping': r'\bmapDeviceMemoryWith(?:Register|Index)\s*\(',
     'smu_sender': r'\b(?:rn_smu13_send|p727r::execute)\s*\(',
+    'mailbox_gate': r'\b(?:p727MailboxLeaseHeld|smu_msg_lock_override|mmio_idx_lock)\b',
+    'observed_mailbox_offsets': r'(?<![A-Za-z0-9_])(?:363016|363080|363112|0x58a08|0x58a48|0x58a68)(?![A-Za-z0-9_])',
+    'volatile_mmio': r'\b(?:volatile\s+(?:u?int(?:8|16|32|64)_t|u(?:8|16|32|64))|reinterpret_cast\s*<\s*volatile)',
 }
 COMPILED = {key: re.compile(value) for key, value in PATTERNS.items()}
 
@@ -50,6 +55,39 @@ def load_sources(root: Path) -> dict[str, str]:
     return sources
 
 
+def load_revision_sources(root: Path, revision: str) -> dict[str, str]:
+    # git archive treats the revision as one argument, without shell expansion.
+    resolved = subprocess.run(['git', '-C', str(root), 'rev-parse', '--verify',
+                               '--end-of-options', revision + '^{commit}'],
+                              check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+    archive = subprocess.run(['git', '-C', str(root), 'archive', '--format=tar', resolved],
+                             check=True, stdout=subprocess.PIPE)
+    sources = {}
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode='r:') as tar:
+        for item in tar:
+            path = Path(item.name)
+            if item.isfile() and path.suffix.lower() in EXTENSIONS:
+                stream = tar.extractfile(item)
+                if stream is not None:
+                    sources[path.as_posix()] = stream.read().decode('utf-8', errors='replace')
+    return sources
+
+
+def candidate_delta(before: dict, after: dict) -> dict:
+    # Multisets avoid both line-number churn and silently dropping duplicates.
+    def counts(report):
+        return Counter((row['path'], row['text'], row['line_sha256'], tuple(row['kinds']))
+                       for row in report['candidates'])
+    old, new = counts(before), counts(after)
+    def rows(delta):
+        return [{'path': path, 'text': text, 'line_sha256': digest, 'kinds': list(kinds), 'count': count}
+                for (path, text, digest, kinds), count in sorted(delta.items())]
+    added, removed = rows(new - old), rows(old - new)
+    return {'added': added, 'removed': removed,
+            'review_required': bool(added or removed),
+            'limitation': 'Lexical candidate differences only; unchanged candidates may change behavior through other code.'}
+
+
 def inventory(sources: dict[str, str]) -> dict:
     candidates = []
     for path, source in sorted(sources.items()):
@@ -57,7 +95,8 @@ def inventory(sources: dict[str, str]) -> dict:
             kinds = [name for name, pattern in COMPILED.items() if pattern.search(line)]
             if kinds:
                 candidates.append({'path': path, 'line': number, 'kinds': kinds,
-                                   'text': line.strip()[:240]})
+                                   'text': line.strip()[:240],
+                                   'line_sha256': hashlib.sha256(line.strip().encode('utf-8')).hexdigest()})
     digest = hashlib.sha256()
     for path, source in sorted(sources.items()):
         digest.update(path.encode('utf-8', errors='surrogateescape') + b'\0')
@@ -110,19 +149,29 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', type=Path, default=ROOT)
     parser.add_argument('--input', type=Path, help='saved P7.36/P7.37 ioreg capture')
+    parser.add_argument('--compare-ref', help='compare lexical candidates with tracked source at this Git revision')
     parser.add_argument('--output', type=Path, help='new JSON file; never overwritten')
     args = parser.parse_args()
     try:
         sources = load_sources(args.repo.expanduser())
         capture = args.input.expanduser().read_text(encoding='utf-8') if args.input else None
         result = report(sources, capture)
+        if args.compare_ref:
+            previous = inventory(load_revision_sources(args.repo.expanduser(), args.compare_ref))
+            result['source_comparison'] = {'revision': args.compare_ref,
+                'baseline_source_sha256': previous['source_sha256'],
+                **candidate_delta(previous, result['source_inventory'])}
+        else:
+            result['source_comparison'] = None
         payload = json.dumps(result, ensure_ascii=False, indent=2) + '\n'
         if args.output:
             with args.output.expanduser().open('x', encoding='utf-8') as out:
                 out.write(payload)
         else:
             print(payload, end='')
-        return 0 if result['evidence_complete'] else 2
+        comparison = result['source_comparison']
+        return 0 if (result['evidence_complete'] and
+                     (comparison is None or not comparison['review_required'])) else 2
     except (OSError, subprocess.CalledProcessError) as exc:
         print(f'P7.39: {exc}', file=sys.stderr)
         return 2
