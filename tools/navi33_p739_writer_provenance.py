@@ -83,9 +83,14 @@ def candidate_delta(before: dict, after: dict) -> dict:
         return [{'path': path, 'text': text, 'line_sha256': digest, 'kinds': list(kinds), 'count': count}
                 for (path, text, digest, kinds), count in sorted(delta.items())]
     added, removed = rows(new - old), rows(old - new)
-    return {'added': added, 'removed': removed,
-            'review_required': bool(added or removed),
-            'limitation': 'Lexical candidate differences only; unchanged candidates may change behavior through other code.'}
+    old_files, new_files = before['file_sha256'], after['file_sha256']
+    changed_files = [{'path': path, 'before_sha256': old_files.get(path),
+                      'after_sha256': new_files.get(path)}
+                     for path in sorted(old_files.keys() | new_files.keys())
+                     if old_files.get(path) != new_files.get(path)]
+    return {'added': added, 'removed': removed, 'changed_source_files': changed_files,
+            'review_required': bool(changed_files),
+            'limitation': 'Source changes require review; the scan cannot exclude ignored, generated, external or non-C-family code.'}
 
 
 def inventory(sources: dict[str, str]) -> dict:
@@ -104,6 +109,8 @@ def inventory(sources: dict[str, str]) -> dict:
     reviewed = baseline.inspect_sources(sources)
     return {'scope': 'git tracked and non-ignored untracked C-family source; lexical candidates',
             'source_file_count': len(sources), 'source_sha256': digest.hexdigest(),
+            'file_sha256': {path: hashlib.sha256(source.encode('utf-8')).hexdigest()
+                            for path, source in sorted(sources.items())},
             'candidates': candidates, 'p734_reviewed_baseline': reviewed,
             'complete_call_graph_proven': False, 'all_possible_writers_excluded': False}
 

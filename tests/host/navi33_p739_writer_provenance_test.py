@@ -67,8 +67,21 @@ class ProvenanceTests(unittest.TestCase):
         old = p739.inventory({'a.cpp': 'constexpr bool p727MailboxLeaseHeld = false;\n'})
         moved = p739.inventory({'a.cpp': '\nconstexpr bool p727MailboxLeaseHeld = false;\n'})
         changed = p739.inventory({'a.cpp': 'constexpr bool p727MailboxLeaseHeld = true;\n'})
-        self.assertFalse(p739.candidate_delta(old, moved)['review_required'])
+        self.assertEqual(p739.candidate_delta(old, moved)['added'], [])
+        self.assertTrue(p739.candidate_delta(old, moved)['review_required'])
         self.assertTrue(p739.candidate_delta(old, changed)['review_required'])
+
+    def test_unmatched_caller_condition_and_file_removal_require_review(self):
+        old = p739.inventory({'a.cpp': 'if (allowed) {\nwr(offset, value);\n}\n'})
+        changed = p739.inventory({'a.cpp': 'if (true) {\nwr(offset, value);\n}\n'})
+        delta = p739.candidate_delta(old, changed)
+        self.assertEqual(delta['added'], [])
+        self.assertEqual(delta['removed'], [])
+        self.assertTrue(delta['review_required'])
+        self.assertEqual(delta['changed_source_files'][0]['path'], 'a.cpp')
+        removed = p739.candidate_delta(old, p739.inventory({}))
+        self.assertTrue(removed['review_required'])
+        self.assertIsNone(removed['changed_source_files'][0]['after_sha256'])
 
     def test_delta_compares_content_beyond_excerpt(self):
         prefix = 'wr(offset, value); ' + ('x' * 250)
