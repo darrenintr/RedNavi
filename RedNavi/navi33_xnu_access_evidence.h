@@ -113,14 +113,13 @@ inline void includeHostSample(const HostSample &s, Report &r) {
     if (yes(s.amdSupportAttached, tree) ||
         yes(s.bootFramebufferAttached, tree))
         r.anyAppleServiceAttached = true;
-    if (yes(s.amdSupportProviderOpen, open) ||
-        yes(s.bootFramebufferProviderOpen, open))
+    const bool namedOpenThisSample =
+        yes(s.amdSupportProviderOpen, open) ||
+        yes(s.bootFramebufferProviderOpen, open);
+    if (namedOpenThisSample)
         r.anyNamedAppleHostOpen = true;
-    if (yes(s.providerOpenByRedNavi, open) &&
-        no(s.providerOpenByAny, open))
-        r.hostSnapshotInconsistent = true;
-    if (r.anyNamedAppleHostOpen &&
-        no(s.providerOpenByAny, open))
+    if (no(s.providerOpenByAny, open) &&
+        (yes(s.providerOpenByRedNavi, open) || namedOpenThisSample))
         r.hostSnapshotInconsistent = true;
 }
 
