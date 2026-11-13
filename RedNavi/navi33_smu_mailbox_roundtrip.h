@@ -11,6 +11,7 @@
 // No PSP/RLC/MES/graphics engine commands are issued here.
 #include <stdint.h>
 #include "navi33_smu_mailbox_admission.h"
+#include "navi33_smu_lifetime_latch.h"
 
 namespace rn_navi33 { namespace smu_mailbox_roundtrip {
 
@@ -61,11 +62,14 @@ enum class Error : uint8_t {
     Quarantined,
     DeadlineExpired,
     ClockRegressed,
+    CrossServiceAttemptAlreadyClaimed,
 };
 
 // One session is retained by the RedNaviProbe instance rather than
-// re-created on every call. The caller serializes access to this state
-// with gpu.smu_msg_lock; a failed attempt is NEVER made eligible again.
+// re-created on every call. A separate atomic Kext-global claim prevents a
+// second service instance from retrying after the first consumes its slot.
+// A Kext reload can reset that global slot and is NOT covered.
+// The caller serializes access to this state with gpu.smu_msg_lock.
 struct SessionState {
     bool consumed = false;
     bool quarantined = false;
@@ -75,6 +79,7 @@ struct SessionState {
 struct Result {
     Error error = Error::NotAdmitted;
     bool attempted = false;
+    bool globalAttemptClaimAcquired = false;
     bool quarantineLease = false;
     bool responseClearWritten = false;
     bool parameterClearWritten = false;
@@ -97,6 +102,7 @@ struct Result {
 // message write, response wait, and version read. The poll count is an
 // additional fail-safe (avoids spinning if a supplied clock stalls).
 // Rejected admission performs zero MMIO operations and consumes no attempt.
+// The Kext-global claim is atomically consumed *before* any BAR5 observation.
 // Once MMIO observation starts, *any* inconsistency quarantines the session.
 //
 // nowNs returns a monotonically increasing 64-bit nanosecond count.
@@ -104,13 +110,23 @@ struct Result {
 template <typename Read, typename Write, typename Pause, typename Now>
 inline Result execute(const admission::Report &gate,
                       const RegisterPlan &reg, bool hostLeaseHeld,
-                      SessionState &state, Read read, Write write,
+                      SessionState &state,
+                      smu_lifetime_latch::AttemptLatch &globalClaim,
+                      Read read, Write write,
                       Pause pause, Now nowNs) {
     Result r{};
     if (!gate.maySubmit || !hostLeaseHeld) return r;
     if (!reg.valid) { r.error = Error::InvalidAddress; return r; }
     if (state.quarantined) { r.error = Error::Quarantined; return r; }
     if (state.consumed) { r.error = Error::AlreadyAttempted; return r; }
+    // The atomic Kext-global latch stops a second RedNaviProbe instance
+    // even if its own SessionState was newly constructed. A failed claim
+    // does not read the clock, touch registers, or consume local state.
+    if (!smu_lifetime_latch::claimOnce(globalClaim)) {
+        r.error = Error::CrossServiceAttemptAlreadyClaimed;
+        return r;
+    }
+    r.globalAttemptClaimAcquired = true;
 
     // Consume before the first MMIO observation; retries after partial
     // progress may misinterpret a delayed firmware response as a new one.
