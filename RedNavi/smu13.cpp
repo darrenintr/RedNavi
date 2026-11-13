@@ -45,7 +45,7 @@ int decode(u32 resp) {
 
 extern "C" int rn_smu13_send(struct rn_device *adev, u32 msg, u32 arg, u32 *out, u32 *resp, unsigned long timeout_us) {
     if (!adev) return -EINVAL;
-    ScopedSmuMessageLock guard(&adev->smu_msg_lock);
+    ScopedSmuMessageLock guard(rn_smu_message_mutex(adev));
     // The previous message has to be finished before the response register can be reused.
     u32 r = pollResponse(adev, timeout_us);
     if (!r) { if (resp) *resp = 0; return -ETIMEDOUT; }
