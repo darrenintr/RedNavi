@@ -8,6 +8,7 @@
 #include <thread>
 // Bring in C++ standard library types before LinuxKPI swap/min macros.
 #include "smu13.h"
+#include "navi33_smu_mailbox_roundtrip.h"
 
 namespace {
 constexpr u32 kBase = 0x100u;
@@ -142,4 +143,57 @@ int main() {
     assert(bus.messages == 4 && bus.maxActive == 1);
     assert(!mutex_is_locked(rn_smu_host_coordinator()));
     assert(!mutex_is_locked(&d.smu_msg_lock));
+
+    // Exercise the actual P7.27 algorithm and an independent legacy
+    // sender against one mock mailbox. The kernel caller takes these
+    // same locks in this order. Synthetic admission exists only here.
+    {
+        std::lock_guard<std::mutex> guard(bus.lock);
+        bus.response = PPSMC_Result_OK;
+        bus.nextResponse = PPSMC_Result_OK;
+        bus.active = 0;
+        bus.polls = 0;
+        bus.messages = 0;
+        bus.complete = 0;
+        bus.maxActive = 0;
+    }
+    namespace rt = rn_navi33::smu_mailbox_roundtrip;
+    rn_navi33::smu_mailbox_admission::Report gate{};
+    gate.maySubmit = true;
+    auto plan = rt::plan(kBase, 0x4000);
+    assert(plan.valid);
+    rt::SessionState session{};
+    rn_navi33::smu_lifetime_latch::AttemptLatch claim{};
+    rt::Result transport{};
+    std::atomic<bool> held{false}, competing{false};
+    int concurrentRc = -1;
+    u32 concurrentResult = 0, concurrentResp = 0;
+    std::thread roundtrip([&]() {
+        mutex_lock(rn_smu_host_coordinator());
+        mutex_lock(&d.smu_msg_lock);
+        held.store(true, std::memory_order_release);
+        while (!competing.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        u64 now = 0;
+        transport = rt::execute(gate, plan, true, session, claim,
+            [&](u32 off) { return rn_rreg32(&d, off / 4); },
+            [&](u32 off, u32 value) { rn_wreg32(&d, off / 4, value); },
+            []() {}, [&]() { now += 100; return now; });
+        mutex_unlock(&d.smu_msg_lock);
+        mutex_unlock(rn_smu_host_coordinator());
+    });
+    std::thread competingSender([&]() {
+        while (!held.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        competing.store(true, std::memory_order_release);
+        concurrentRc = rn_smu13_send(&other, PPSMC_MSG_GetSmuVersion, 0,
+                                     &concurrentResult, &concurrentResp, 500000);
+    });
+    roundtrip.join();
+    competingSender.join();
+    assert(transport.verified && session.verified);
+    assert(concurrentRc == 0 && concurrentResp == PPSMC_Result_OK);
+    assert(concurrentResult == bus.result);
+    assert(bus.messages == 2 && bus.complete == 2 && bus.maxActive == 1);
+    assert(!mutex_is_locked(rn_smu_host_coordinator()));
 }
