@@ -9,6 +9,8 @@ namespace rt = smu_mailbox_roundtrip;
 
 struct Fake {
     rt::RegisterPlan reg;
+    smu_lifetime_latch::AttemptLatch claim{};
+    smu_lifetime_latch::AttemptLatch *sharedClaim = &claim;
     uint32_t response = smu::kResponseOk;
     uint32_t parameter = 99u;
     uint32_t message = 0u;
@@ -68,7 +70,7 @@ smu::Report admitted() {
 }
 rt::Result run(Fake &f, rt::SessionState &session,
                smu::Report gate = admitted(), bool leased = true) {
-    return rt::execute(gate, f.reg, leased, session,
+    return rt::execute(gate, f.reg, leased, session, *f.sharedClaim,
         [&](uint32_t o) { return f.read(o); },
         [&](uint32_t o, uint32_t v) { f.write(o, v); },
         [&]() { f.pause(); },
@@ -99,6 +101,19 @@ int main() {
         auto second = run(f, session);
         assert(second.error == rt::Error::AlreadyAttempted);
         assert(f.messageWrites == 1u && f.writes == 3u);
+        assert(smu_lifetime_latch::isClaimed(f.claim));
+    }
+    { // A new service instance has a fresh local session, but must
+      // still be rejected by the same global Kext attempt latch.
+        Fake first(reg), next(reg);
+        next.sharedClaim = &first.claim;
+        rt::SessionState local1{}, local2{};
+        auto a = run(first, local1);
+        assert(a.verified && smu_lifetime_latch::isClaimed(first.claim));
+        auto b = run(next, local2);
+        assert(b.error == rt::Error::CrossServiceAttemptAlreadyClaimed);
+        assert(!local2.consumed && !local2.quarantined);
+        assert(next.writes == 0u && next.clockReads == 0u);
     }
     { // Default-off admission must not consume session or even read clock.
         Fake f(reg); rt::SessionState session{};
@@ -109,6 +124,7 @@ int main() {
         auto second = run(f, session, admitted(), false);
         assert(second.error == rt::Error::NotAdmitted &&
                !session.consumed && f.writes == 0u && f.clockReads == 0u);
+        assert(!smu_lifetime_latch::isClaimed(f.claim));
     }
     { // Invalid BAR mapping rejects before consuming the session.
         auto wrong = rt::plan(0x16000u, 16u);
@@ -125,6 +141,11 @@ int main() {
                session.consumed && session.quarantined && f.writes == 0u);
         const auto again = run(f, session);
         assert(again.error == rt::Error::Quarantined && f.writes == 0u);
+        Fake reprobe(reg); reprobe.sharedClaim = &f.claim;
+        rt::SessionState newServiceSession{};
+        auto blocked = run(reprobe, newServiceSession);
+        assert(blocked.error == rt::Error::CrossServiceAttemptAlreadyClaimed);
+        assert(reprobe.writes == 0u && reprobe.clockReads == 0u);
     }
     { // Failed clear readback cannot be treated as a fresh response.
         Fake f(reg); rt::SessionState session{};
